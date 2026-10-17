@@ -45,6 +45,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <esp_lcd_ili9341.h>
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
+#include <cstring>
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -7915,10 +7916,14 @@ public:
         }
 
         AvatarSet::Mode mode_enum;
+        bool rle = false;   // local addition: "matrix_rle" = run-length coded matrix set (~75x smaller download)
         if (strcmp(mode_j->valuestring, "layered") == 0) {
             mode_enum = AvatarSet::Mode::kLayered;
         } else if (strcmp(mode_j->valuestring, "matrix") == 0) {
             mode_enum = AvatarSet::Mode::kMatrix;
+        } else if (strcmp(mode_j->valuestring, "matrix_rle") == 0) {
+            mode_enum = AvatarSet::Mode::kMatrix;
+            rle = true;
         } else {
             ESP_LOGW(TAG, "OnAvatarSetFetch: unknown mode '%s'", mode_j->valuestring);
             SendAvatarSetLoadedError(req_checksum, "unknown_mode");
@@ -7966,6 +7971,7 @@ public:
         context->mode = mode_enum;
         context->expected_size = static_cast<size_t>(size_j->valuedouble);
         context->expected_sha256 = cJSON_IsString(checksum) ? checksum->valuestring : "";
+        context->rle = rle;
 
         BaseType_t ok = xTaskCreate(
             &StackChanBoard::AvatarFetchTaskTrampoline,
@@ -8141,7 +8147,34 @@ public:
         AvatarSet::Mode mode;
         size_t expected_size;
         std::string expected_sha256;
+        bool rle = false;   // payload is RLE1-coded; decoded size is AvatarSet::kMatrixPayloadBytes
     };
+
+    // RLE1: "RLE1" + uint32 LE raw size, then uint16 LE tokens: bit15 set = repeat the next uint16
+    // pixel (ctrl & 0x7FFF) times, else ctrl literal pixels follow. Bounds-checked; false on any error.
+    static bool DecodeRle1(const uint8_t* in, size_t in_len, uint8_t* out, size_t out_len) {
+        if (in_len < 8 || memcmp(in, "RLE1", 4) != 0) return false;
+        const uint32_t raw = in[4] | (in[5] << 8) | (in[6] << 16) | ((uint32_t)in[7] << 24);
+        if (raw != out_len) return false;
+        size_t i = 8, o = 0;
+        while (i + 2 <= in_len) {
+            const uint16_t ctrl = in[i] | (in[i + 1] << 8);
+            i += 2;
+            const size_t count = ctrl & 0x7FFF;
+            if (ctrl & 0x8000) {
+                if (i + 2 > in_len || o + count * 2 > out_len) return false;
+                const uint8_t lo = in[i], hi = in[i + 1];
+                i += 2;
+                for (size_t k = 0; k < count; ++k) { out[o++] = lo; out[o++] = hi; }
+            } else {
+                if (i + count * 2 > in_len || o + count * 2 > out_len) return false;
+                memcpy(out + o, in + i, count * 2);
+                i += count * 2;
+                o += count * 2;
+            }
+        }
+        return o == out_len && i == in_len;
+    }
 
     static void AvatarFetchTaskTrampoline(void* arg) {
         auto* ctx = static_cast<AvatarFetchContext*>(arg);
@@ -8164,7 +8197,9 @@ public:
         // (the avatar layer is hidden meanwhile; it comes back on success).
         bool unhide_after = false;
         const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-        if (avatar_set_.is_loaded() && largest < ctx->expected_size + 64 * 1024) {
+        const size_t decoded_size = ctx->rle ? AvatarSet::kMatrixPayloadBytes : ctx->expected_size;
+        const size_t need = decoded_size + (ctx->rle ? ctx->expected_size : 0) + 64 * 1024;
+        if (avatar_set_.is_loaded() && largest < need) {
             ESP_LOGW(TAG, "Avatar fetch: only %u bytes PSRAM block free, releasing old set first",
                      (unsigned int)largest);
             if (display_ != nullptr) {
@@ -8183,6 +8218,42 @@ public:
 
         bool fetch_ok = false;
         std::string fetched_checksum;
+        if (ctx->rle) {
+            std::string actual, err;
+            uint8_t* packed = AvatarSetFetcher::FetchRaw(ctx->url, ctx->token, ctx->expected_size,
+                                                         ctx->expected_sha256, actual, err);
+            uint8_t* decoded = nullptr;
+            if (packed != nullptr) {
+                decoded = static_cast<uint8_t*>(heap_caps_malloc(decoded_size, MALLOC_CAP_SPIRAM));
+                if (decoded == nullptr) {
+                    err = "psram_oom";
+                } else if (!DecodeRle1(packed, ctx->expected_size, decoded, decoded_size)) {
+                    err = "decode_failed";
+                    heap_caps_free(decoded);
+                    decoded = nullptr;
+                }
+                heap_caps_free(packed);
+            }
+            if (decoded != nullptr) {
+                bool loaded;
+                if (display_ != nullptr) {
+                    DisplayLockGuard lock(display_);
+                    loaded = avatar_set_.AdoptOwnedBuffer(ctx->mode, decoded, decoded_size);
+                } else {
+                    loaded = avatar_set_.AdoptOwnedBuffer(ctx->mode, decoded, decoded_size);
+                }
+                if (!loaded) {
+                    heap_caps_free(decoded);
+                    err = "load_failed";
+                } else {
+                    fetch_ok = true;
+                    fetched_checksum = actual;
+                    ESP_LOGI(TAG, "Avatar set loaded from RLE (%u -> %u bytes)",
+                             (unsigned int)ctx->expected_size, (unsigned int)decoded_size);
+                }
+            }
+            SendAvatarSetLoaded(fetch_ok, actual.empty() ? expected_sha256 : actual, fetch_ok ? "" : err);
+        } else
         AvatarSetFetcher::Fetch(
             avatar_set_,
             ctx->url, ctx->token,

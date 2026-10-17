@@ -262,10 +262,14 @@ class Gateway:
             payload = f.read()
 
         kimg_bytes = 160 * 120 * 2  # 38_400 — matches AvatarSet::kImageBytes
+        if mode == "matrix_rle":  # STACKCHAN-LOCAL-PATCH rle: header "RLE1" + raw size of a matrix set
+            if payload[:4] != b"RLE1" or int.from_bytes(payload[4:8], "little") != 90 * kimg_bytes:
+                return {"ok": False, "error": "bad_rle_payload"}
         expected = {
             "layered": 14 * kimg_bytes,   # 537_600
             "matrix":  90 * kimg_bytes,   # 3_456_000
             "panel":   320 * 240 * 2,     # 153_600  STACKCHAN-LOCAL-PATCH panel
+            "matrix_rle": len(payload),   # STACKCHAN-LOCAL-PATCH rle (checked above)
         }.get(mode)
         if expected is None:
             return {"ok": False, "error": f"unknown_mode: {mode}"}
