@@ -44,6 +44,7 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <esp_lcd_panel_commands.h>
 #include <esp_lcd_ili9341.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -738,6 +739,11 @@ private:
     // avatar_set_loaded error="fetch_in_progress" rather than racing
     // the worker task that is already running.
     std::atomic<bool> avatar_fetch_in_progress_{false};
+    // Local addition: checksum of the set currently in avatar_set_ (only touched
+    // while avatar_fetch_in_progress_ is held). Lets a repeat load of the same
+    // set (gateway restart) succeed instantly instead of needing a second
+    // 3.4 MB PSRAM buffer, which no longer fits next to the wake word model.
+    std::string loaded_checksum_;
 
     // ---- Local addition: screen panels -----------------------------------
     // A full-resolution 320x240 RGB565 image fetched like an avatar set
@@ -7930,6 +7936,14 @@ public:
             SendAvatarSetLoadedError(req_checksum, "fetch_in_progress");
             return;
         }
+        if (avatar_set_.is_loaded() && !req_checksum.empty() &&
+            req_checksum == loaded_checksum_) {
+            avatar_fetch_in_progress_.store(false, std::memory_order_release);
+            ESP_LOGI(TAG, "OnAvatarSetFetch: set already loaded (%s), skipping download",
+                     req_checksum.c_str());
+            SendAvatarSetLoaded(true, req_checksum, "");
+            return;
+        }
         EnsureAvatarPendingLock();
         if (avatar_pending_lock_ != nullptr &&
             xSemaphoreTake(avatar_pending_lock_, portMAX_DELAY) == pdTRUE) {
@@ -8138,17 +8152,53 @@ public:
         // by checksum; replying with an empty key means the failure
         // cannot resolve any waiter and the caller waits until timeout.
         const std::string expected_sha256 = ctx->expected_sha256;
+
+        // Local addition: PSRAM is tight with the wake word model loaded. If the
+        // new set cannot fit next to the old one, release the old set first
+        // (the avatar layer is hidden meanwhile; it comes back on success).
+        bool unhide_after = false;
+        const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+        if (avatar_set_.is_loaded() && largest < ctx->expected_size + 64 * 1024) {
+            ESP_LOGW(TAG, "Avatar fetch: only %u bytes PSRAM block free, releasing old set first",
+                     (unsigned int)largest);
+            if (display_ != nullptr) {
+                DisplayLockGuard lock(display_);
+                if (avatar_img_ != nullptr) {
+                    lv_obj_add_flag(avatar_img_, LV_OBJ_FLAG_HIDDEN);
+                    lv_image_set_src(avatar_img_, nullptr);
+                }
+                avatar_set_.Unload();
+            } else {
+                avatar_set_.Unload();
+            }
+            loaded_checksum_.clear();
+            unhide_after = (current_avatar_face_ != "off");
+        }
+
+        bool fetch_ok = false;
+        std::string fetched_checksum;
         AvatarSetFetcher::Fetch(
             avatar_set_,
             ctx->url, ctx->token,
             ctx->mode, ctx->expected_size, ctx->expected_sha256,
-            [expected_sha256](bool ok,
+            [expected_sha256, &fetch_ok, &fetched_checksum](bool ok,
                               const std::string& actual_checksum,
                               const std::string& error_code) {
                 const std::string& correlation =
                     actual_checksum.empty() ? expected_sha256 : actual_checksum;
+                fetch_ok = ok;
+                fetched_checksum = actual_checksum;
                 SendAvatarSetLoaded(ok, correlation, error_code);
             });
+        if (fetch_ok) {
+            loaded_checksum_ = fetched_checksum;
+        }
+        if (unhide_after && fetch_ok && display_ != nullptr) {
+            DisplayLockGuard lock(display_);
+            if (avatar_img_ != nullptr) {
+                lv_obj_clear_flag(avatar_img_, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
 
         // Fetch finished (success or failure). Clear the in-progress flag
         // BEFORE replaying pending state — otherwise the public
