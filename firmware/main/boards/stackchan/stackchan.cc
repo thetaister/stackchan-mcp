@@ -8062,9 +8062,8 @@ public:
             panel_dsc_.data_size = PANEL_BYTES;
             panel_dsc_.data = buf;
             panel_buf_ = buf;
-            // Re-setting the same descriptor address: drop the cached source first.
+            // Same descriptor address each time: clear the source first so LVGL re-reads it.
             lv_image_set_src(panel_img_, nullptr);
-            lv_image_cache_drop(&panel_dsc_);
             lv_image_set_src(panel_img_, &panel_dsc_);
             lv_obj_clear_flag(panel_img_, LV_OBJ_FLAG_HIDDEN);
             if (old != nullptr) heap_caps_free(old);
@@ -8104,7 +8103,6 @@ public:
             DisplayLockGuard lock(display_);
             lv_obj_add_flag(panel_img_, LV_OBJ_FLAG_HIDDEN);
             lv_image_set_src(panel_img_, nullptr);
-            lv_image_cache_drop(&panel_dsc_);
             if (panel_buf_ != nullptr) {
                 heap_caps_free(panel_buf_);
                 panel_buf_ = nullptr;
