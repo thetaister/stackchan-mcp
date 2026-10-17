@@ -7993,6 +7993,12 @@ public:
     };
 
     void StartPanelFetch(const cJSON* root, const std::string& req_checksum) {
+        auto hide_j = cJSON_GetObjectItem(root, "hide");
+        if (cJSON_IsTrue(hide_j)) {   // {"mode":"panel","hide":true}: take the panel down now
+            HidePanel();
+            SendAvatarSetLoaded(true, req_checksum, "");
+            return;
+        }
         auto url      = cJSON_GetObjectItem(root, "url");
         auto token    = cJSON_GetObjectItem(root, "token");
         auto size_j   = cJSON_GetObjectItem(root, "expected_size");
