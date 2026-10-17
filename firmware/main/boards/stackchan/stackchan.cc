@@ -8165,10 +8165,11 @@ public:
                 if (i + 2 > in_len || o + count * 2 > out_len) return false;
                 const uint8_t lo = in[i], hi = in[i + 1];
                 i += 2;
+                if (out == nullptr) { o += count * 2; continue; }   // validate-only pass
                 for (size_t k = 0; k < count; ++k) { out[o++] = lo; out[o++] = hi; }
             } else {
                 if (i + count * 2 > in_len || o + count * 2 > out_len) return false;
-                memcpy(out + o, in + i, count * 2);
+                if (out != nullptr) memcpy(out + o, in + i, count * 2);
                 i += count * 2;
                 o += count * 2;
             }
@@ -8199,7 +8200,9 @@ public:
         const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
         const size_t decoded_size = ctx->rle ? AvatarSet::kMatrixPayloadBytes : ctx->expected_size;
         const size_t need = decoded_size + (ctx->rle ? ctx->expected_size : 0) + 64 * 1024;
-        if (avatar_set_.is_loaded() && largest < need) {
+        const bool rle_in_place = ctx->rle &&
+            avatar_set_.MutableBuffer(AvatarSet::Mode::kMatrix, decoded_size) != nullptr;
+        if (avatar_set_.is_loaded() && largest < need && !rle_in_place) {
             ESP_LOGW(TAG, "Avatar fetch: only %u bytes PSRAM block free, releasing old set first",
                      (unsigned int)largest);
             if (display_ != nullptr) {
@@ -8223,6 +8226,29 @@ public:
             uint8_t* packed = AvatarSetFetcher::FetchRaw(ctx->url, ctx->token, ctx->expected_size,
                                                          ctx->expected_sha256, actual, err);
             uint8_t* decoded = nullptr;
+            if (packed != nullptr && rle_in_place) {
+                // Overwrite the set that is already loaded: validate first, then decode straight into
+                // its buffer under the display lock. No second buffer, no freeing of the old set.
+                if (!DecodeRle1(packed, ctx->expected_size, nullptr, decoded_size)) {
+                    err = "decode_failed";
+                } else if (display_ != nullptr) {
+                    DisplayLockGuard lock(display_);
+                    uint8_t* buf = avatar_set_.MutableBuffer(AvatarSet::Mode::kMatrix, decoded_size);
+                    fetch_ok = buf != nullptr && DecodeRle1(packed, ctx->expected_size, buf, decoded_size);
+                    if (avatar_img_ != nullptr) lv_obj_invalidate(avatar_img_);
+                } else {
+                    uint8_t* buf = avatar_set_.MutableBuffer(AvatarSet::Mode::kMatrix, decoded_size);
+                    fetch_ok = buf != nullptr && DecodeRle1(packed, ctx->expected_size, buf, decoded_size);
+                }
+                if (fetch_ok) {
+                    fetched_checksum = actual;
+                    ESP_LOGI(TAG, "Avatar set replaced in place from RLE (%u bytes)", (unsigned int)ctx->expected_size);
+                } else if (err.empty()) {
+                    err = "decode_failed";
+                }
+                heap_caps_free(packed);
+                packed = nullptr;
+            }
             if (packed != nullptr) {
                 decoded = static_cast<uint8_t*>(heap_caps_malloc(decoded_size, MALLOC_CAP_SPIRAM));
                 if (decoded == nullptr) {

@@ -93,6 +93,13 @@ public:
     // buffer until the swap commits (no black-frame flash on update).
     bool AdoptOwnedBuffer(Mode mode, uint8_t* owned_buffer, size_t image_data_size);
 
+    // Local addition: writable view of the loaded buffer, for overwriting a set in place with
+    // another set of the same mode and size (no second 3.4 MB allocation). nullptr if not loaded
+    // or the mode/size differ. Caller must hold the display lock while writing.
+    uint8_t* MutableBuffer(Mode mode, size_t size) {
+        return (loaded_ && mode_ == mode && image_buffer_size_ == size) ? image_buffer_ : nullptr;
+    }
+
     // Release the PSRAM buffer and clear all internal lv_image_dsc_t entries.
     // Safe to call multiple times.
     void Unload();
