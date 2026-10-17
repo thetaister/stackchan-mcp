@@ -90,6 +90,32 @@ def patch_manager(pkg: pathlib.Path) -> bool:
     print("  patched: esp32_client.py (panel-mgr)"); return True
 
 
+HIDE_TAG = "STACKCHAN-LOCAL-PATCH panel-hide"
+HIDE_OLD = """        if self._capture_app is None:
+            return {"ok": False, "error": "gateway_not_started"}
+        if not os.path.exists(archive_path):"""
+HIDE_NEW = """        if self._capture_app is None:
+            return {"ok": False, "error": "gateway_not_started"}
+        if mode == "panel" and archive_path == "hide":  # STACKCHAN-LOCAL-PATCH panel-hide
+            return await self.esp32.send_avatar_set_fetch(
+                url="", token="", mode="panel", checksum="panel-hide-" + os.urandom(6).hex(),
+                expected_size=0, timeout=timeout, extra={"hide": True})
+        if not os.path.exists(archive_path):"""
+
+
+def patch_hide(pkg: pathlib.Path) -> bool:
+    """load_avatar_set(archive_path="hide", mode="panel") takes the current panel down (firmware v3)."""
+    p = pkg / "gateway.py"
+    s = p.read_text(encoding="utf-8")
+    if HIDE_TAG in s:
+        print("  already patched: gateway.py (panel-hide)"); return True
+    if s.count(HIDE_OLD) != 1:
+        print("  ERROR: anchor not found in gateway.py (panel-hide)"); return False
+    shutil.copy2(p, p.with_suffix(".py.panelhide.orig"))
+    p.write_text(s.replace(HIDE_OLD, HIDE_NEW), encoding="utf-8")
+    print("  patched: gateway.py (panel-hide)"); return True
+
+
 def main(pkg: pathlib.Path) -> bool:
     ok = True
     for name, edits in EDITS.items():
@@ -126,4 +152,5 @@ if __name__ == "__main__":
         pkg = pathlib.Path(stackchan_mcp.__file__).parent
     ok = main(pkg)
     ok = patch_manager(pkg) and ok
+    ok = patch_hide(pkg) and ok
     sys.exit(0 if ok else 1)

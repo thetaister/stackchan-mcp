@@ -251,6 +251,10 @@ class Gateway:
         """
         if self._capture_app is None:
             return {"ok": False, "error": "gateway_not_started"}
+        if mode == "panel" and archive_path == "hide":  # STACKCHAN-LOCAL-PATCH panel-hide
+            return await self.esp32.send_avatar_set_fetch(
+                url="", token="", mode="panel", checksum="panel-hide-" + os.urandom(6).hex(),
+                expected_size=0, timeout=timeout, extra={"hide": True})
         if not os.path.exists(archive_path):
             return {"ok": False, "error": f"archive_not_found: {archive_path}"}
 
