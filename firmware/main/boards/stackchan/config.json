@@ -13,7 +13,7 @@
                 "CONFIG_USE_CUSTOM_WAKE_WORD=y",
                 "CONFIG_CUSTOM_WAKE_WORD=\"hey mochi\"",
                 "CONFIG_CUSTOM_WAKE_WORD_DISPLAY=\"hey mochi\"",
-                "CONFIG_CUSTOM_WAKE_WORD_THRESHOLD=15",
+                "CONFIG_CUSTOM_WAKE_WORD_THRESHOLD=10",
                 "CONFIG_SR_MN_CN_NONE=y",
                 "CONFIG_SR_MN_EN_MULTINET7_QUANT=y"
             ]
