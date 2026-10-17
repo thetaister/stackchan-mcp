@@ -1087,6 +1087,7 @@ class ESP32Manager:
         checksum: str,
         expected_size: int,
         timeout: float = 60.0,
+        extra: dict[str, Any] | None = None,  # STACKCHAN-LOCAL-PATCH panel-mgr
     ) -> dict[str, Any]:
         """Forward an avatar_set_fetch to the device and await the reply.
 
@@ -1098,7 +1099,7 @@ class ESP32Manager:
         if not self._connection or not self._connection.connected:
             return {"ok": False, "checksum": checksum, "error": "no_device"}
         return await self._connection.send_avatar_set_fetch(
-            url, token, mode, checksum, expected_size, timeout
+            url, token, mode, checksum, expected_size, timeout, extra=extra
         )
 
     async def send_audio_frame(self, opus_frame: bytes) -> None:

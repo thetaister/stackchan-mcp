@@ -57,6 +57,39 @@ SECONDS_NEW = '''                            "default": 60.0,
                     "required": ["archive_path", "mode"],'''
 
 
+MGR_TAG = "STACKCHAN-LOCAL-PATCH panel-mgr"
+MGR_OLD = """        expected_size: int,
+        timeout: float = 60.0,
+    ) -> dict[str, Any]:
+        \"\"\"Forward an avatar_set_fetch to the device and await the reply.
+"""
+MGR_NEW = """        expected_size: int,
+        timeout: float = 60.0,
+        extra: dict[str, Any] | None = None,  # STACKCHAN-LOCAL-PATCH panel-mgr
+    ) -> dict[str, Any]:
+        \"\"\"Forward an avatar_set_fetch to the device and await the reply.
+"""
+MGR_OLD2 = """        return await self._connection.send_avatar_set_fetch(
+            url, token, mode, checksum, expected_size, timeout
+        )"""
+MGR_NEW2 = """        return await self._connection.send_avatar_set_fetch(
+            url, token, mode, checksum, expected_size, timeout, extra=extra
+        )"""
+
+
+def patch_manager(pkg: pathlib.Path) -> bool:
+    """ESP32Manager.send_avatar_set_fetch (the wrapper the gateway actually calls) must pass `extra` on."""
+    p = pkg / "esp32_client.py"
+    s = p.read_text(encoding="utf-8")
+    if MGR_TAG in s:
+        print("  already patched: esp32_client.py (panel-mgr)"); return True
+    if s.count(MGR_OLD) != 1 or s.count(MGR_OLD2) != 1:
+        print("  ERROR: anchor not found in esp32_client.py (panel-mgr)"); return False
+    shutil.copy2(p, p.with_suffix(".py.panelmgr.orig"))
+    p.write_text(s.replace(MGR_OLD, MGR_NEW).replace(MGR_OLD2, MGR_NEW2), encoding="utf-8")
+    print("  patched: esp32_client.py (panel-mgr)"); return True
+
+
 def main(pkg: pathlib.Path) -> bool:
     ok = True
     for name, edits in EDITS.items():
@@ -91,4 +124,6 @@ if __name__ == "__main__":
     else:
         import stackchan_mcp
         pkg = pathlib.Path(stackchan_mcp.__file__).parent
-    sys.exit(0 if main(pkg) else 1)
+    ok = main(pkg)
+    ok = patch_manager(pkg) and ok
+    sys.exit(0 if ok else 1)
