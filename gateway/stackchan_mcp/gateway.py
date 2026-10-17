@@ -240,6 +240,7 @@ class Gateway:
         archive_path: str,
         mode: str,
         timeout: float = 60.0,
+        seconds: float | None = None,  # STACKCHAN-LOCAL-PATCH panel
     ) -> dict:
         """Stage an avatar set + notify the device + await its reply.
 
@@ -260,6 +261,7 @@ class Gateway:
         expected = {
             "layered": 14 * kimg_bytes,   # 537_600
             "matrix":  90 * kimg_bytes,   # 3_456_000
+            "panel":   320 * 240 * 2,     # 153_600  STACKCHAN-LOCAL-PATCH panel
         }.get(mode)
         if expected is None:
             return {"ok": False, "error": f"unknown_mode: {mode}"}
@@ -284,6 +286,8 @@ class Gateway:
             checksum=sha256,
             expected_size=len(payload),
             timeout=timeout,
+            extra=({"duration_ms": int(max(1.0, min(float(seconds or 10.0), 600.0)) * 1000)}
+                   if mode == "panel" else None),  # STACKCHAN-LOCAL-PATCH panel
         )
         # Surface the staging metadata for caller-side observability.
         result.setdefault("checksum", sha256)

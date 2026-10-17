@@ -887,14 +887,14 @@ async def _dispatch_mcp_tool(
                     ),
                 )
             ]
-        if mode not in ("layered", "matrix"):
+        if mode not in ("layered", "matrix", "panel"):  # STACKCHAN-LOCAL-PATCH panel
             return [
                 TextContent(
                     type="text",
                     text=json.dumps({"ok": False, "error": f"unknown mode: {mode}"}),
                 )
             ]
-        result = await gateway.load_avatar_set(archive_path, mode, timeout)
+        result = await gateway.load_avatar_set(archive_path, mode, timeout, seconds=arguments.get("seconds"))  # STACKCHAN-LOCAL-PATCH panel
         return [TextContent(type="text", text=json.dumps(result))]
 
     if name == "stackchan_follow_pose_stream":
@@ -2891,7 +2891,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                         "mode": {
                             "type": "string",
-                            "enum": ["layered", "matrix"],
+                            "enum": ["layered", "matrix", "panel"],  # STACKCHAN-LOCAL-PATCH panel
                             "description": (
                                 "'layered' (14 frames, ~525 KB) or "
                                 "'matrix' (90 frames, ~3.3 MB)."
@@ -2907,7 +2907,12 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                             "minimum": 5.0,
                             "maximum": 300.0,
                         },
+                        "seconds": {
+                            "type": "number",
+                            "description": "panel mode only: how long the panel stays on screen (default 10).",
+                        },
                     },
+                    # STACKCHAN-LOCAL-PATCH panel
                     "required": ["archive_path", "mode"],
                 },
             ),

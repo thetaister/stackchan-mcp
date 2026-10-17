@@ -738,6 +738,29 @@ private:
     // avatar_set_loaded error="fetch_in_progress" rather than racing
     // the worker task that is already running.
     std::atomic<bool> avatar_fetch_in_progress_{false};
+
+    // ---- Local addition: screen panels -----------------------------------
+    // A full-resolution 320x240 RGB565 image fetched like an avatar set
+    // (avatar_set_fetch with mode="panel") and shown on lv_layer_top() above
+    // the avatar for duration_ms, then hidden. A screen tap dismisses it.
+    static constexpr int PANEL_W = 320;
+    static constexpr int PANEL_H = 240;
+    static constexpr size_t PANEL_BYTES = PANEL_W * PANEL_H * 2;
+    lv_obj_t* panel_img_ = nullptr;
+    lv_image_dsc_t panel_dsc_{};
+    uint8_t* panel_buf_ = nullptr;             // owned PSRAM buffer backing panel_dsc_
+    esp_timer_handle_t panel_hide_timer_ = nullptr;
+    std::atomic<bool> panel_visible_{false};
+    std::atomic<bool> panel_fetch_in_progress_{false};
+    bool screen_tap_swallow_release_ = false;  // tap that dismissed a panel
+
+    // ---- Local addition: ignore head touches while the head moves --------
+    // Head movement (incl. the stroke wobble) disturbs the Si12T pads and
+    // reads as a new touch, which re-triggers the wobble in a loop. Presses
+    // that start while moving or within MOTION_TOUCH_GUARD_MS after are dropped.
+    static constexpr int MOTION_TOUCH_GUARD_MS = 1200;
+    std::atomic<uint64_t> last_motion_us_{0};  // written by servo task
+    bool press_suppressed_by_motion_ = false;  // touch poll task only
     SemaphoreHandle_t avatar_pending_lock_ = nullptr;
     struct PendingAvatarState {
         bool has_off = false;
@@ -3039,6 +3062,12 @@ private:
             }
             was_touched = true;
             touch_start_time = now_ms;
+            if (panel_visible_.load(std::memory_order_acquire)) {
+                // A tap while a panel is up only dismisses the panel.
+                HidePanel();
+                screen_tap_swallow_release_ = true;
+                return;
+            }
             // タッチ瞬時の PlaySound 直接呼び出しは行わない。 直後に
             // StartListening → EnableVoiceProcessing(true) → ResetDecoder で
             // playback queue がクリアされて音が消えるため。 代わりに
@@ -3052,6 +3081,10 @@ private:
             was_touched = false;
             int64_t touch_duration = now_ms - touch_start_time;
             last_release_ms = now_ms;
+            if (screen_tap_swallow_release_) {
+                screen_tap_swallow_release_ = false;
+                return;
+            }
 
             // 只有短触才触发
             if (touch_duration < TOUCH_THRESHOLD_MS) {
@@ -4565,6 +4598,10 @@ private:
             motion_driver_->Tick();
             MaybeAutoReleaseTorque();
             ServoWobbleStepAdvance();
+            if (servo_wobble_active_.load(std::memory_order_relaxed) ||
+                motion_driver_->IsMoving()) {
+                last_motion_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
+            }
             taskYIELD();
         }
     }
@@ -4715,6 +4752,18 @@ private:
             press_start_zones_[1] = s.zone[1];
             press_start_zones_[2] = s.zone[2];
             press_start_output1_raw_ = s.output1_raw;
+            const uint64_t last_motion = last_motion_us_.load(std::memory_order_relaxed);
+            if (last_motion != 0 &&
+                now_us < last_motion + (uint64_t)MOTION_TOUCH_GUARD_MS * 1000ULL) {
+                // Press began while the head was moving (or just after):
+                // almost certainly the motion itself. Drop the whole touch.
+                press_suppressed_by_motion_ = true;
+                touch_pressed_prev_ = true;
+                touch_press_start_us_ = now_us;
+                ESP_LOGI(TAG, "touch ignored: head moving");
+                return;
+            }
+            press_suppressed_by_motion_ = false;
             if (now_us < cooldown_until_us_) {
                 // Suppress press event while in post-reaction cooldown.
                 touch_pressed_prev_ = now;
@@ -4726,6 +4775,10 @@ private:
         } else {
             // Falling edge: classify by hold duration.
             touch_pressed_prev_ = false;
+            if (press_suppressed_by_motion_) {
+                press_suppressed_by_motion_ = false;
+                return;
+            }
             uint64_t duration_ms = (now_us - touch_press_start_us_) / 1000ULL;
             if (now_us < cooldown_until_us_) {
                 // We were in cooldown when pressed — drop the release event too.
@@ -7850,6 +7903,11 @@ public:
             return;
         }
 
+        if (strcmp(mode_j->valuestring, "panel") == 0) {
+            StartPanelFetch(root, req_checksum);
+            return;
+        }
+
         AvatarSet::Mode mode_enum;
         if (strcmp(mode_j->valuestring, "layered") == 0) {
             mode_enum = AvatarSet::Mode::kLayered;
@@ -7908,6 +7966,152 @@ public:
             avatar_fetch_in_progress_.store(false, std::memory_order_release);
             SendAvatarSetLoadedError(req_checksum, "task_create_failed");
         }
+    }
+
+    // ---- Local addition: screen panels ----------------------------------
+
+    struct PanelFetchContext {
+        StackChanBoard* board;
+        std::string url;
+        std::string token;
+        std::string expected_sha256;
+        uint32_t duration_ms;
+    };
+
+    void StartPanelFetch(const cJSON* root, const std::string& req_checksum) {
+        auto url      = cJSON_GetObjectItem(root, "url");
+        auto token    = cJSON_GetObjectItem(root, "token");
+        auto size_j   = cJSON_GetObjectItem(root, "expected_size");
+        auto dur_j    = cJSON_GetObjectItem(root, "duration_ms");
+        if (!cJSON_IsString(url) || !cJSON_IsString(token) || !cJSON_IsNumber(size_j)) {
+            SendAvatarSetLoadedError(req_checksum, "missing_fields");
+            return;
+        }
+        if (static_cast<size_t>(size_j->valuedouble) != PANEL_BYTES) {
+            SendAvatarSetLoadedError(req_checksum, "size_mismatch");
+            return;
+        }
+        if (panel_fetch_in_progress_.exchange(true, std::memory_order_acq_rel)) {
+            SendAvatarSetLoadedError(req_checksum, "fetch_in_progress");
+            return;
+        }
+        uint32_t duration_ms = 10000;
+        if (cJSON_IsNumber(dur_j)) {
+            double d = dur_j->valuedouble;
+            if (d < 1000) d = 1000;
+            if (d > 600000) d = 600000;
+            duration_ms = static_cast<uint32_t>(d);
+        }
+        auto* ctx = new PanelFetchContext{this, url->valuestring, token->valuestring,
+                                          req_checksum, duration_ms};
+        BaseType_t ok = xTaskCreate(&StackChanBoard::PanelFetchTaskTrampoline,
+                                    "panel_fetch", 8192, ctx, tskIDLE_PRIORITY + 2, nullptr);
+        if (ok != pdPASS) {
+            delete ctx;
+            panel_fetch_in_progress_.store(false, std::memory_order_release);
+            SendAvatarSetLoadedError(req_checksum, "task_create_failed");
+        }
+    }
+
+    static void PanelFetchTaskTrampoline(void* arg) {
+        auto* ctx = static_cast<PanelFetchContext*>(arg);
+        ctx->board->RunPanelFetch(ctx);
+        delete ctx;
+        vTaskDelete(nullptr);
+    }
+
+    void RunPanelFetch(const PanelFetchContext* ctx) {
+        std::string actual, err;
+        uint8_t* buf = AvatarSetFetcher::FetchRaw(ctx->url, ctx->token, PANEL_BYTES,
+                                                  ctx->expected_sha256, actual, err);
+        panel_fetch_in_progress_.store(false, std::memory_order_release);
+        const std::string& correlation = actual.empty() ? ctx->expected_sha256 : actual;
+        if (buf == nullptr) {
+            ESP_LOGW(TAG, "Panel fetch failed: %s", err.c_str());
+            SendAvatarSetLoaded(false, correlation, err);
+            return;
+        }
+        if (!ShowPanel(buf, ctx->duration_ms)) {
+            heap_caps_free(buf);
+            SendAvatarSetLoaded(false, correlation, "display_not_ready");
+            return;
+        }
+        SendAvatarSetLoaded(true, correlation, "");
+    }
+
+    // Takes ownership of buf on success.
+    bool ShowPanel(uint8_t* buf, uint32_t duration_ms) {
+        if (display_ == nullptr) return false;
+        HandleScreenActivity();  // wake the backlight if the screen was asleep
+        {
+            DisplayLockGuard lock(display_);
+            if (panel_img_ == nullptr) {
+                panel_img_ = lv_image_create(lv_layer_top());
+                if (panel_img_ == nullptr) return false;
+                lv_obj_align(panel_img_, LV_ALIGN_CENTER, 0, 0);
+                lv_obj_clear_flag(panel_img_, LV_OBJ_FLAG_SCROLLABLE);
+                lv_obj_clear_flag(panel_img_, LV_OBJ_FLAG_CLICKABLE);
+            }
+            uint8_t* old = panel_buf_;
+            panel_dsc_ = {};
+            panel_dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;
+            panel_dsc_.header.cf = LV_COLOR_FORMAT_RGB565;
+            panel_dsc_.header.w = PANEL_W;
+            panel_dsc_.header.h = PANEL_H;
+            panel_dsc_.header.stride = PANEL_W * 2;
+            panel_dsc_.data_size = PANEL_BYTES;
+            panel_dsc_.data = buf;
+            panel_buf_ = buf;
+            // Re-setting the same descriptor address: drop the cached source first.
+            lv_image_set_src(panel_img_, nullptr);
+            lv_image_cache_drop(&panel_dsc_);
+            lv_image_set_src(panel_img_, &panel_dsc_);
+            lv_obj_clear_flag(panel_img_, LV_OBJ_FLAG_HIDDEN);
+            if (old != nullptr) heap_caps_free(old);
+        }
+        panel_visible_.store(true, std::memory_order_release);
+        if (panel_hide_timer_ == nullptr) {
+            esp_timer_create_args_t args = {
+                .callback = &StackChanBoard::PanelHideCb,
+                .arg = this,
+                .dispatch_method = ESP_TIMER_TASK,
+                .name = "panel_hide",
+                .skip_unhandled_events = true,
+            };
+            if (esp_timer_create(&args, &panel_hide_timer_) != ESP_OK) {
+                panel_hide_timer_ = nullptr;
+            }
+        }
+        if (panel_hide_timer_ != nullptr) {
+            esp_timer_stop(panel_hide_timer_);
+            esp_timer_start_once(panel_hide_timer_, (uint64_t)duration_ms * 1000ULL);
+        }
+        ESP_LOGI(TAG, "Panel shown for %u ms", (unsigned int)duration_ms);
+        return true;
+    }
+
+    static void PanelHideCb(void* arg) {
+        static_cast<StackChanBoard*>(arg)->HidePanel();
+    }
+
+    void HidePanel() {
+        if (panel_hide_timer_ != nullptr) esp_timer_stop(panel_hide_timer_);
+        if (display_ == nullptr || panel_img_ == nullptr) {
+            panel_visible_.store(false, std::memory_order_release);
+            return;
+        }
+        {
+            DisplayLockGuard lock(display_);
+            lv_obj_add_flag(panel_img_, LV_OBJ_FLAG_HIDDEN);
+            lv_image_set_src(panel_img_, nullptr);
+            lv_image_cache_drop(&panel_dsc_);
+            if (panel_buf_ != nullptr) {
+                heap_caps_free(panel_buf_);
+                panel_buf_ = nullptr;
+            }
+        }
+        panel_visible_.store(false, std::memory_order_release);
+        ESP_LOGI(TAG, "Panel hidden");
     }
 
     // ---- Phase 4.5 avatar helpers --------------------------------------

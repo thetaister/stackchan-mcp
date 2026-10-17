@@ -47,4 +47,17 @@ public:
         size_t expected_size,
         const std::string& expected_sha256,  // "sha256:<hex>" form, may be empty to skip
         CompletionCallback on_complete);
+
+    // Local addition (screen panels): plain authenticated GET into a fresh
+    // PSRAM buffer + optional SHA256 check, without touching any AvatarSet.
+    // Returns the buffer (caller owns it, free with heap_caps_free) or
+    // nullptr on failure with error_code set (same codes as above).
+    // actual_sha256 is filled whenever the body was read completely.
+    static uint8_t* FetchRaw(
+        const std::string& url,
+        const std::string& bearer_token,
+        size_t expected_size,
+        const std::string& expected_sha256,
+        std::string& actual_sha256,
+        std::string& error_code);
 };

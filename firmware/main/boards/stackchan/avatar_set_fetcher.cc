@@ -151,3 +151,69 @@ void AvatarSetFetcher::Fetch(
              actual_sha256.c_str());
     on_complete(true, actual_sha256, "");
 }
+
+uint8_t* AvatarSetFetcher::FetchRaw(
+    const std::string& url,
+    const std::string& bearer_token,
+    size_t expected_size,
+    const std::string& expected_sha256,
+    std::string& actual_sha256,
+    std::string& error_code) {
+    actual_sha256.clear();
+    error_code.clear();
+    auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        error_code = "http_open_failed";
+        return nullptr;
+    }
+    auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        error_code = "http_open_failed";
+        return nullptr;
+    }
+    http->SetHeader("Authorization", (std::string("Bearer ") + bearer_token).c_str());
+    http->SetHeader("Accept", "application/octet-stream");
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "FetchRaw: Open failed for url=%s", url.c_str());
+        error_code = "http_open_failed";
+        return nullptr;
+    }
+    if (http->GetBodyLength() != expected_size) {
+        ESP_LOGW(TAG, "FetchRaw: Content-Length mismatch (got=%u, expected=%u)",
+                 static_cast<unsigned int>(http->GetBodyLength()),
+                 static_cast<unsigned int>(expected_size));
+        http->Close();
+        error_code = "content_length_mismatch";
+        return nullptr;
+    }
+    uint8_t* buffer = static_cast<uint8_t*>(
+        heap_caps_malloc(expected_size, MALLOC_CAP_SPIRAM));
+    if (buffer == nullptr) {
+        http->Close();
+        error_code = "psram_oom";
+        return nullptr;
+    }
+    size_t total_read = 0;
+    while (total_read < expected_size) {
+        const size_t to_read = std::min(kReadChunkBytes, expected_size - total_read);
+        int n = http->Read(reinterpret_cast<char*>(buffer + total_read),
+                           static_cast<int>(to_read));
+        if (n <= 0) {
+            ESP_LOGE(TAG, "FetchRaw: Read failed at offset %u (n=%d)",
+                     static_cast<unsigned int>(total_read), n);
+            heap_caps_free(buffer);
+            http->Close();
+            error_code = "read_failed";
+            return nullptr;
+        }
+        total_read += static_cast<size_t>(n);
+    }
+    http->Close();
+    actual_sha256 = Sha256Hex(buffer, expected_size);
+    if (!expected_sha256.empty() && actual_sha256 != expected_sha256) {
+        heap_caps_free(buffer);
+        error_code = "checksum_mismatch";
+        return nullptr;
+    }
+    return buffer;
+}

@@ -268,6 +268,7 @@ class ESP32Connection:
         checksum: str,
         expected_size: int,
         timeout: float = 60.0,
+        extra: dict[str, Any] | None = None,  # STACKCHAN-LOCAL-PATCH panel
     ) -> dict[str, Any]:
         """Send avatar_set_fetch notification and wait for avatar_set_loaded.
 
@@ -293,6 +294,8 @@ class ESP32Connection:
             "checksum": checksum,
             "expected_size": expected_size,
         }
+        if extra:  # STACKCHAN-LOCAL-PATCH panel
+            msg.update(extra)
         try:
             await self._ws.send(json.dumps(msg))
             result = await asyncio.wait_for(future, timeout=timeout)

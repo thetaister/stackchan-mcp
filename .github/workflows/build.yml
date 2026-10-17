@@ -48,6 +48,14 @@ jobs:
           path: |
             firmware/build/merged-binary.bin
             firmware/build/xiaozhi.bin
+            firmware/build/generated_assets.bin
+            firmware/build/flash_args
+            firmware/build/flasher_args.json
+            firmware/build/partition_table/partition-table.bin
+            firmware/build/bootloader/bootloader.bin
+            firmware/build/ota_data_initial.bin
+            firmware/build/sdkconfig
+            firmware/sdkconfig
             firmware/releases/v2.2.6_stackchan.zip
 
   firmware-host-test:

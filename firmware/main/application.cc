@@ -962,7 +962,11 @@ void Application::HandleWakeWordDetectedEvent() {
             });
             return;
         }
-        // Channel already opened, continue directly
+        // Channel already opened (persistent gateway WebSocket): still pass
+        // through Connecting, because ContinueWakeWordInvoke() bails out unless
+        // the state is Connecting. Without this the wake word only worked once
+        // per boot (local fix, see upstream-issue-wakeword.md).
+        SetDeviceState(kDeviceStateConnecting);
         ContinueWakeWordInvoke(wake_word, generation);
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
@@ -990,6 +994,11 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word, uint32_t 
     // Check state again in case it was changed during scheduling
     if (GetDeviceState() != kDeviceStateConnecting || !IsListeningRequestCurrent(generation)) {
         listening_profile_ = ListeningProfileAfterStop(listening_profile_);
+        // The detection itself disabled wake word detection; turn it back on
+        // when giving up here, or the device stays deaf until reboot.
+        if (GetDeviceState() == kDeviceStateIdle) {
+            audio_service_.EnableWakeWordDetection(true);
+        }
         return;
     }
 
@@ -1229,7 +1238,11 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
             });
             return;
         }
-        // Channel already opened, continue directly
+        // Channel already opened (persistent gateway WebSocket): still pass
+        // through Connecting, because ContinueWakeWordInvoke() bails out unless
+        // the state is Connecting. Without this the wake word only worked once
+        // per boot (local fix, see upstream-issue-wakeword.md).
+        SetDeviceState(kDeviceStateConnecting);
         ContinueWakeWordInvoke(wake_word, generation);
     } else if (state == kDeviceStateSpeaking) {
         Schedule([this]() {
