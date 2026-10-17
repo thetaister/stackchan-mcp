@@ -143,6 +143,8 @@ void CustomWakeWord::Stop() {
     input_buffer_.clear();
 }
 
+static constexpr int32_t kWakeInputGain = 3;
+
 void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
     if (multinet_model_data_ == nullptr) {
         return;
@@ -167,7 +169,15 @@ void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
     while (input_buffer_.size() >= chunksize) {
         std::vector<int16_t> chunk(input_buffer_.begin(), input_buffer_.begin() + chunksize);
         StoreWakeWordData(chunk);
-        
+
+        // Local addition (Mochi build): MultiNet gets the raw mic signal here (no AFE/AGC),
+        // so a normal speaking voice scored below threshold. Boost it ~+9.5 dB (x3, clipped)
+        // for detection only; the stored wake word audio and the conversation path are unchanged.
+        for (auto& sample : chunk) {
+            int32_t v = static_cast<int32_t>(sample) * kWakeInputGain;
+            sample = static_cast<int16_t>(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
+        }
+
         esp_mn_state_t mn_state = multinet_->detect(multinet_model_data_, chunk.data());
         
         if (mn_state == ESP_MN_STATE_DETECTED) {
