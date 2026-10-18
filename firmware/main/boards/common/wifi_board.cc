@@ -339,6 +339,7 @@ std::string WifiBoard::GetDeviceStatusJson() {
     int rssi = wifi.GetRssi();
     const char* signal = rssi >= -60 ? "strong" : (rssi >= -70 ? "medium" : "weak");
     cJSON_AddStringToObject(network, "signal", signal);
+    cJSON_AddNumberToObject(network, "rssi", rssi);   // Mochi v9: exact dBm
     cJSON_AddItemToObject(root, "network", network);
 
     // Chip temperature

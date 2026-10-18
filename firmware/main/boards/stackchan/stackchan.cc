@@ -765,6 +765,62 @@ private:
     esp_timer_handle_t link_timer_ = nullptr;
     bool link_listen_guard_fired_ = false;
 
+    // ---- Mochi v9: Wi-Fi meter (self.screen.wifi_meter) - big live dBm readout for positioning ----
+    std::atomic<int64_t> wifi_meter_until_us_{0};
+    lv_obj_t* wifi_meter_box_ = nullptr;
+    lv_obj_t* wifi_meter_value_ = nullptr;
+    lv_obj_t* wifi_meter_sub_ = nullptr;
+
+    void EnsureWifiMeterLocked() {
+        if (wifi_meter_box_ != nullptr) return;
+        wifi_meter_box_ = lv_obj_create(lv_layer_top());
+        lv_obj_remove_style_all(wifi_meter_box_);
+        lv_obj_set_size(wifi_meter_box_, 240, 120);
+        lv_obj_align(wifi_meter_box_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_style_radius(wifi_meter_box_, 14, 0);
+        lv_obj_set_style_bg_opa(wifi_meter_box_, LV_OPA_90, 0);
+        lv_obj_set_style_bg_color(wifi_meter_box_, lv_color_hex(0x101018), 0);
+        lv_obj_set_style_border_width(wifi_meter_box_, 3, 0);
+        lv_obj_set_style_border_color(wifi_meter_box_, lv_color_hex(0x40D070), 0);
+        lv_obj_clear_flag(wifi_meter_box_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(wifi_meter_box_, LV_OBJ_FLAG_CLICKABLE);
+        wifi_meter_value_ = lv_label_create(wifi_meter_box_);
+        lv_obj_set_style_text_color(wifi_meter_value_, lv_color_hex(0xF0F0F0), 0);
+        lv_obj_set_width(wifi_meter_value_, 80);
+        lv_obj_set_style_text_align(wifi_meter_value_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(wifi_meter_value_, LV_ALIGN_CENTER, 0, -18);
+        lv_obj_set_style_transform_pivot_x(wifi_meter_value_, 40, 0);
+        lv_obj_set_style_transform_pivot_y(wifi_meter_value_, 8, 0);
+        lv_obj_set_style_transform_scale(wifi_meter_value_, 768, 0);     // 3x the 14 px font
+        wifi_meter_sub_ = lv_label_create(wifi_meter_box_);
+        lv_obj_set_style_text_color(wifi_meter_sub_, lv_color_hex(0xB0B4C0), 0);
+        lv_obj_set_width(wifi_meter_sub_, 220);
+        lv_obj_set_style_text_align(wifi_meter_sub_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(wifi_meter_sub_, LV_ALIGN_BOTTOM_MID, 0, -12);
+    }
+
+    // Called from UpdateLinkIcon with the display lock held.
+    void UpdateWifiMeterLocked(int rssi, uint32_t silence) {
+        const bool on = esp_timer_get_time() < wifi_meter_until_us_.load(std::memory_order_acquire);
+        if (!on) {
+            if (wifi_meter_box_ != nullptr) lv_obj_add_flag(wifi_meter_box_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+        EnsureWifiMeterLocked();
+        lv_obj_clear_flag(wifi_meter_box_, LV_OBJ_FLAG_HIDDEN);
+        const char* verdict = rssi > -127 ? (rssi >= -60 ? "strong" : (rssi >= -67 ? "OK" : "weak")) : "no Wi-Fi";
+        uint32_t col = rssi >= -60 ? 0x40D070 : (rssi >= -67 ? 0xF0C040 : 0xE04848);
+        char big[16], sub[64];
+        if (rssi > -127) snprintf(big, sizeof(big), "%d", rssi); else snprintf(big, sizeof(big), "--");
+        const char* link = silence == UINT32_MAX ? "PC link: down" : (silence > 10000 ? "PC link: stalled" : "PC link: OK");
+        snprintf(sub, sizeof(sub), "dBm  %s   |   %s", verdict, link);
+        lv_label_set_text(wifi_meter_value_, big);
+        lv_label_set_text(wifi_meter_sub_, sub);
+        lv_obj_set_style_text_color(wifi_meter_value_, lv_color_hex(col), 0);
+        lv_obj_set_style_border_color(wifi_meter_box_, lv_color_hex(col), 0);
+        lv_obj_move_foreground(wifi_meter_box_);
+    }
+
     void InitializeLinkIcon() {
         if (display_ == nullptr) return;
         {
@@ -834,6 +890,7 @@ private:
             lv_obj_set_style_bg_color(link_bars_[i], lv_color_hex(i < bars ? 0xF0F0F0 : 0x505050), 0);
         }
         lv_obj_move_foreground(link_icon_);                               // stay above panels
+        UpdateWifiMeterLocked(rssi, silence);                             // Mochi v9
     }
     lv_image_dsc_t panel_dsc_{};
     uint8_t* panel_buf_ = nullptr;             // owned PSRAM buffer backing panel_dsc_
@@ -6022,6 +6079,24 @@ private:
                 int timeout_seconds = properties["seconds"].value<int>();
                 bool applied = SetScreenOffTimeoutSeconds(timeout_seconds);
                 return GetScreenOffTimeoutJson(applied);
+            });
+
+        mcp_server.AddTool(
+            "self.screen.wifi_meter",
+            "Show a large live Wi-Fi meter on the screen for N seconds (0 hides it): exact signal "
+            "in dBm, a strong/OK/weak verdict and whether the link to the PC is flowing. Updates "
+            "every second. Use it while repositioning the robot or the router.",
+            PropertyList({
+                Property("seconds", kPropertyTypeInteger, 0, 300)
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int secs = properties["seconds"].value<int>();
+                wifi_meter_until_us_.store(secs > 0 ? esp_timer_get_time() + (int64_t)secs * 1000000LL : 0,
+                                           std::memory_order_release);
+                auto& wifi = WifiManager::GetInstance();
+                int rssi = wifi.IsConnected() ? wifi.GetRssi() : 0;
+                return std::string("{\"ok\":true,\"seconds\":") + std::to_string(secs) +
+                       ",\"rssi\":" + std::to_string(rssi) + "}";
             });
 
         mcp_server.AddTool(
