@@ -828,7 +828,7 @@ private:
             link_icon_ = lv_obj_create(lv_layer_top());
             lv_obj_remove_style_all(link_icon_);
             lv_obj_set_size(link_icon_, 34, 20);
-            lv_obj_align(link_icon_, LV_ALIGN_TOP_RIGHT, -6, 6);
+            lv_obj_align(link_icon_, LV_ALIGN_TOP_LEFT, 6, 6);   // top-right is the listening dot
             lv_obj_clear_flag(link_icon_, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_clear_flag(link_icon_, LV_OBJ_FLAG_CLICKABLE);
             link_dot_ = lv_obj_create(link_icon_);
