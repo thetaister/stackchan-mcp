@@ -146,8 +146,26 @@ bool WebsocketProtocol::Start() {
     return OpenAudioChannelInternal(false, false);
 }
 
+uint32_t WebsocketProtocol::GetLinkSilenceMs() const {
+    if (websocket_ == nullptr || !transport_connected_.load(std::memory_order_acquire)) {
+        return UINT32_MAX;
+    }
+    uint64_t now_us = esp_timer_get_time();
+    uint64_t last_us = last_received_us_.load(std::memory_order_acquire);
+    if (last_us == 0 || now_us < last_us) {
+        return 0;
+    }
+    uint64_t ms = (now_us - last_us) / 1000ULL;
+    return ms > 0xFFFFFFF0ULL ? 0xFFFFFFF0U : (uint32_t)ms;
+}
+
 bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        return false;
+    }
+    // Mochi v8: when the gateway has been silent for >10 s the link is stalled; a blocking send would wedge
+    // the audio task (AFE ringbuffer overflow, stuck "listening" until reset - 2026-10-18). Drop instead.
+    if (GetLinkSilenceMs() > 10000) {
         return false;
     }
 

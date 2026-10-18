@@ -20,7 +20,7 @@
 // WebSocket Ping and check connection liveness. The peer's Pong refreshes
 // the liveness signal (see OnPong wiring), so this also sets how often the
 // liveness timestamp is renewed on an idle-but-healthy connection.
-#define WEBSOCKET_KEEPALIVE_INTERVAL_MS 15000
+#define WEBSOCKET_KEEPALIVE_INTERVAL_MS 5000   // Mochi v8: was 15000; feeds the on-screen link icon
 // Dead-connection threshold: if no frame of any kind (a Pong answering our
 // Ping, or any gateway data frame) has arrived within this many
 // milliseconds, the connection is considered dead and a reconnect is
@@ -41,6 +41,7 @@ public:
     bool IsAudioChannelOpened() const override;
     bool IsTransportConnected() const override;
     std::string GetConnectedUrl() const override;
+    uint32_t GetLinkSilenceMs() const override;
 
 private:
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);

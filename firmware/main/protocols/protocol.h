@@ -6,6 +6,7 @@
 #include <functional>
 #include <chrono>
 #include <vector>
+#include <cstdint>
 
 struct AudioStreamPacket {
     int sample_rate = 0;
@@ -78,6 +79,8 @@ public:
     // that lack a persistent-transport notion are unaffected.
     virtual bool IsTransportConnected() const { return false; }
     virtual std::string GetConnectedUrl() const { return ""; }
+    // Mochi v8: ms since the last frame of any kind arrived from the gateway (UINT32_MAX = not connected).
+    virtual uint32_t GetLinkSilenceMs() const { return UINT32_MAX; }
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);

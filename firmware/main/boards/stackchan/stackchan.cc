@@ -1,4 +1,5 @@
 #include "wifi_board.h"
+#include <wifi_manager.h>
 #include "cores3_audio_codec.h"
 #include "display/lcd_display.h"
 #include "application.h"
@@ -754,6 +755,86 @@ private:
     static constexpr int PANEL_H = 240;
     static constexpr size_t PANEL_BYTES = PANEL_W * PANEL_H * 2;
     lv_obj_t* panel_img_ = nullptr;
+
+    // ---- Mochi v8: link-health icon (top-right, above the face and any panel) ----
+    // Dot: green = data from the gateway within 10 s; amber = 10 s+ silence or weak signal; red = not connected.
+    // Bars: Wi-Fi strength (same -60/-70 dBm thresholds as get_device_info). Updated every second.
+    lv_obj_t* link_icon_ = nullptr;
+    lv_obj_t* link_dot_ = nullptr;
+    lv_obj_t* link_bars_[3] = {nullptr, nullptr, nullptr};
+    esp_timer_handle_t link_timer_ = nullptr;
+    bool link_listen_guard_fired_ = false;
+
+    void InitializeLinkIcon() {
+        if (display_ == nullptr) return;
+        {
+            DisplayLockGuard lock(display_);
+            link_icon_ = lv_obj_create(lv_layer_top());
+            lv_obj_remove_style_all(link_icon_);
+            lv_obj_set_size(link_icon_, 34, 20);
+            lv_obj_align(link_icon_, LV_ALIGN_TOP_RIGHT, -6, 6);
+            lv_obj_clear_flag(link_icon_, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_clear_flag(link_icon_, LV_OBJ_FLAG_CLICKABLE);
+            link_dot_ = lv_obj_create(link_icon_);
+            lv_obj_remove_style_all(link_dot_);
+            lv_obj_set_size(link_dot_, 8, 8);
+            lv_obj_set_style_radius(link_dot_, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_opa(link_dot_, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(link_dot_, lv_color_hex(0xE04848), 0);
+            lv_obj_align(link_dot_, LV_ALIGN_LEFT_MID, 0, 3);
+            for (int i = 0; i < 3; ++i) {
+                lv_obj_t* b = lv_obj_create(link_icon_);
+                lv_obj_remove_style_all(b);
+                lv_obj_set_size(b, 5, 6 + i * 5);
+                lv_obj_set_style_radius(b, 1, 0);
+                lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+                lv_obj_set_style_bg_color(b, lv_color_hex(0x505050), 0);
+                lv_obj_align(b, LV_ALIGN_BOTTOM_LEFT, 13 + i * 7, -2);
+                lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
+                link_bars_[i] = b;
+            }
+        }
+        esp_timer_create_args_t args = {};
+        args.callback = [](void* arg) { static_cast<StackChanBoard*>(arg)->UpdateLinkIcon(); };
+        args.arg = this;
+        args.dispatch_method = ESP_TIMER_TASK;
+        args.name = "link_icon";
+        if (esp_timer_create(&args, &link_timer_) == ESP_OK) {
+            esp_timer_start_periodic(link_timer_, 1000 * 1000);
+        }
+    }
+
+    void UpdateLinkIcon() {
+        auto& app = Application::GetInstance();
+        const uint32_t silence = app.GetLinkSilenceMs();
+        auto& wifi = WifiManager::GetInstance();
+        int rssi = wifi.IsConnected() ? wifi.GetRssi() : -127;
+        if (rssi == 0) rssi = -127;
+        const int bars = rssi >= -60 ? 3 : (rssi >= -70 ? 2 : (rssi > -127 ? 1 : 0));
+        uint32_t dot = 0x40D070;                                         // green
+        if (silence == UINT32_MAX) dot = 0xE04848;                        // red: no connection to the gateway
+        else if (silence > 10000 || bars <= 1) dot = 0xF0A030;            // amber: stalled or weak
+
+        // Jam guard: the link stalled (or dropped) while listening -> stop listening rather than keep
+        // feeding a capture that cannot be sent (2026-10-18: stuck "listening", AFE ringbuffer full).
+        if (app.GetDeviceState() == kDeviceStateListening && silence > 12000) {
+            if (!link_listen_guard_fired_) {
+                link_listen_guard_fired_ = true;
+                ESP_LOGW(TAG, "Link silent %u ms while listening - stopping listen", (unsigned)silence);
+                app.StopListening();
+            }
+        } else if (app.GetDeviceState() != kDeviceStateListening) {
+            link_listen_guard_fired_ = false;
+        }
+
+        if (link_icon_ == nullptr || display_ == nullptr) return;
+        DisplayLockGuard lock(display_);
+        lv_obj_set_style_bg_color(link_dot_, lv_color_hex(dot), 0);
+        for (int i = 0; i < 3; ++i) {
+            lv_obj_set_style_bg_color(link_bars_[i], lv_color_hex(i < bars ? 0xF0F0F0 : 0x505050), 0);
+        }
+        lv_obj_move_foreground(link_icon_);                               // stay above panels
+    }
     lv_image_dsc_t panel_dsc_{};
     uint8_t* panel_buf_ = nullptr;             // owned PSRAM buffer backing panel_dsc_
     esp_timer_handle_t panel_hide_timer_ = nullptr;
@@ -7797,6 +7878,7 @@ public:
         // but moving the scan is safer for any future I2C peripheral too.
         InitializeSpi();
         InitializeIli9342Display();
+        InitializeLinkIcon();   // Mochi v8
         InitializeCamera();
         InitializeFt6336TouchPad();
         GetBacklight()->RestoreBrightness();
