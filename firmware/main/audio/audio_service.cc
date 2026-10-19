@@ -156,7 +156,11 @@ void AudioService::Start() {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioInputTask();
         vTaskDelete(NULL);
+#if CONFIG_USE_MICRO_WAKE_WORD
+    }, "audio_input", 2048 * 4, this, 8, &audio_input_task_handle_, 0);   // Mochi: TFLite inference runs here
+#else
     }, "audio_input", 2048 * 3, this, 8, &audio_input_task_handle_, 0);
+#endif
 
     /* Start the audio output task */
     xTaskCreate([](void* arg) {
