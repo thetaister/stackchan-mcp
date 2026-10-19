@@ -91,7 +91,18 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
         models_ = esp_srmodel_init("model");
 #ifdef CONFIG_CUSTOM_WAKE_WORD
         threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
-        commands_.push_back({CONFIG_CUSTOM_WAKE_WORD, CONFIG_CUSTOM_WAKE_WORD_DISPLAY, "wake"});
+        // Local addition (Mochi build): ';' separates alternative phrasings (same as the assets path).
+        {
+            std::string all = CONFIG_CUSTOM_WAKE_WORD;
+            size_t start = 0;
+            while (start <= all.size()) {
+                size_t end = all.find(';', start);
+                if (end == std::string::npos) end = all.size();
+                std::string phrase = all.substr(start, end - start);
+                if (!phrase.empty()) commands_.push_back({phrase, CONFIG_CUSTOM_WAKE_WORD_DISPLAY, "wake"});
+                start = end + 1;
+            }
+        }
 #endif
     } else {
         models_ = models_list;

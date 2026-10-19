@@ -898,12 +898,16 @@ def main():
             "language": language,
             "duration": 3000,  # Default duration in ms
             "threshold": custom_wake_word_config['threshold'],
+            # Local addition (Mochi build): CONFIG_CUSTOM_WAKE_WORD may list several
+            # phrasings separated by ';' (e.g. "hey mochi;hi mochi"). Each becomes its own
+            # wake command; all share the display text, so the app sees one wake word.
             "commands": [
                 {
-                    "command": custom_wake_word_config['wake_word'],
+                    "command": phrase.strip(),
                     "text": custom_wake_word_config['display'],
                     "action": "wake"
                 }
+                for phrase in custom_wake_word_config['wake_word'].split(';') if phrase.strip()
             ]
         }
         print(f"  custom wake word: {custom_wake_word_config['wake_word']} ({custom_wake_word_config['display']})")
