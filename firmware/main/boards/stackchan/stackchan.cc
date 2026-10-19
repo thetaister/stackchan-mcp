@@ -762,6 +762,7 @@ private:
     // Mochi v10: bars only appear while the signal is weak (below -67 dBm; hidden again at -64 or better).
     lv_obj_t* link_icon_ = nullptr;
     bool link_bars_shown_ = false;
+    lv_obj_t* link_bars_box_ = nullptr;
     lv_obj_t* link_dot_ = nullptr;
     lv_obj_t* link_bars_[3] = {nullptr, nullptr, nullptr};
     esp_timer_handle_t link_timer_ = nullptr;
@@ -827,31 +828,42 @@ private:
         if (display_ == nullptr) return;
         {
             DisplayLockGuard lock(display_);
+            // v10b: the dot mirrors the listening indicator (same pill and dot size, top-left corner).
             link_icon_ = lv_obj_create(lv_layer_top());
             lv_obj_remove_style_all(link_icon_);
-            lv_obj_set_size(link_icon_, 34, 20);
-            lv_obj_align(link_icon_, LV_ALIGN_TOP_LEFT, 6, 6);   // top-right is the listening dot
+            lv_obj_set_size(link_icon_, 36, 30);
+            lv_obj_align(link_icon_, LV_ALIGN_TOP_LEFT, 8, 8);   // listening indicator is TOP_RIGHT -8, 8
+            lv_obj_set_style_radius(link_icon_, 10, 0);
+            lv_obj_set_style_bg_color(link_icon_, lv_color_black(), 0);
+            lv_obj_set_style_bg_opa(link_icon_, LV_OPA_70, 0);
             lv_obj_clear_flag(link_icon_, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_clear_flag(link_icon_, LV_OBJ_FLAG_CLICKABLE);
             link_dot_ = lv_obj_create(link_icon_);
             lv_obj_remove_style_all(link_dot_);
-            lv_obj_set_size(link_dot_, 8, 8);
+            lv_obj_set_size(link_dot_, LISTENING_INDICATOR_DOT_SIZE_PX, LISTENING_INDICATOR_DOT_SIZE_PX);
             lv_obj_set_style_radius(link_dot_, LV_RADIUS_CIRCLE, 0);
             lv_obj_set_style_bg_opa(link_dot_, LV_OPA_COVER, 0);
             lv_obj_set_style_bg_color(link_dot_, lv_color_hex(0xE04848), 0);
-            lv_obj_align(link_dot_, LV_ALIGN_LEFT_MID, 0, 3);
+            lv_obj_center(link_dot_);
+            // Bars sit just right of the pill and only show while the signal is weak.
+            link_bars_box_ = lv_obj_create(lv_layer_top());
+            lv_obj_remove_style_all(link_bars_box_);
+            lv_obj_set_size(link_bars_box_, 24, 30);
+            lv_obj_align(link_bars_box_, LV_ALIGN_TOP_LEFT, 8 + 36 + 4, 8);
+            lv_obj_clear_flag(link_bars_box_, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_clear_flag(link_bars_box_, LV_OBJ_FLAG_CLICKABLE);
             for (int i = 0; i < 3; ++i) {
-                lv_obj_t* b = lv_obj_create(link_icon_);
+                lv_obj_t* b = lv_obj_create(link_bars_box_);
                 lv_obj_remove_style_all(b);
-                lv_obj_set_size(b, 5, 6 + i * 5);
+                lv_obj_set_size(b, 5, 8 + i * 6);
                 lv_obj_set_style_radius(b, 1, 0);
                 lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
                 lv_obj_set_style_bg_color(b, lv_color_hex(0x505050), 0);
-                lv_obj_align(b, LV_ALIGN_BOTTOM_LEFT, 13 + i * 7, -2);
+                lv_obj_align(b, LV_ALIGN_BOTTOM_LEFT, i * 8, -4);
                 lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
-                lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);              // v10: shown only when weak
                 link_bars_[i] = b;
             }
+            lv_obj_add_flag(link_bars_box_, LV_OBJ_FLAG_HIDDEN);    // v10: shown only when weak
         }
         esp_timer_create_args_t args = {};
         args.callback = [](void* arg) { static_cast<StackChanBoard*>(arg)->UpdateLinkIcon(); };
@@ -894,10 +906,11 @@ private:
         else if (link_bars_shown_ && rssi >= -64) link_bars_shown_ = false;
         for (int i = 0; i < 3; ++i) {
             lv_obj_set_style_bg_color(link_bars_[i], lv_color_hex(i < bars ? 0xF0F0F0 : 0x505050), 0);
-            if (link_bars_shown_) lv_obj_clear_flag(link_bars_[i], LV_OBJ_FLAG_HIDDEN);
-            else lv_obj_add_flag(link_bars_[i], LV_OBJ_FLAG_HIDDEN);
         }
+        if (link_bars_shown_) lv_obj_clear_flag(link_bars_box_, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(link_bars_box_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(link_icon_);                               // stay above panels
+        lv_obj_move_foreground(link_bars_box_);
         UpdateWifiMeterLocked(rssi, silence);                             // Mochi v9
     }
     lv_image_dsc_t panel_dsc_{};
