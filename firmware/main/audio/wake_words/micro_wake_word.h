@@ -53,6 +53,7 @@ private:
     bool GenerateFeatures(const int16_t* samples, size_t count, int8_t features[kFeatureSize], size_t* used);
     void RunInference(const int8_t features[kFeatureSize]);
     void ResetProbabilities();
+    void ApplySensitivity();
     void StoreWakeWordData(const int16_t* data, size_t samples);
 
     AudioCodec* codec_ = nullptr;
@@ -81,6 +82,7 @@ private:
 
     // Detection
     uint8_t cutoff_ = 0;                       // quantised 0-255
+    int applied_cutoff_pct_ = -1;
     std::vector<uint8_t> window_;              // last N probabilities
     size_t window_index_ = 0;
     int ignore_slices_ = -kIgnoreSlicesAfterReset;

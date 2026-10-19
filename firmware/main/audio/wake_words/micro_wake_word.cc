@@ -1,5 +1,7 @@
 #include "micro_wake_word.h"
+#include "micro_wake_word_settings.h"
 #include "audio_service.h"
+#include "settings.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -34,7 +36,51 @@ uint8_t* AllocPreferPsram(size_t size) {
     return p;
 }
 
+// Live sensitivity (set from the MCP tool, read by the inference loop).
+std::atomic<int> g_cutoff_pct{CONFIG_MICRO_WAKE_WORD_CUTOFF};
+std::atomic<int> g_window{CONFIG_MICRO_WAKE_WORD_WINDOW};
+std::atomic<bool> g_loaded{false};
+
+void LoadSavedSensitivity() {
+    if (g_loaded.exchange(true)) return;
+    Settings settings("mww", false);
+    int c = settings.GetInt("cutoff", CONFIG_MICRO_WAKE_WORD_CUTOFF);
+    int w = settings.GetInt("window", CONFIG_MICRO_WAKE_WORD_WINDOW);
+    g_cutoff_pct = std::clamp(c, 50, 99);
+    g_window = std::clamp(w, 1, 10);
+}
+
 }  // namespace
+
+void MwwSetSensitivity(int cutoff_pct, int window) {
+    LoadSavedSensitivity();
+    cutoff_pct = std::clamp(cutoff_pct, 50, 99);
+    window = std::clamp(window, 1, 10);
+    {
+        Settings settings("mww", true);
+        settings.SetInt("cutoff", cutoff_pct);
+        settings.SetInt("window", window);
+    }
+    g_cutoff_pct = cutoff_pct;
+    g_window = window;
+}
+
+void MwwGetSensitivity(int* cutoff_pct, int* window) {
+    LoadSavedSensitivity();
+    *cutoff_pct = g_cutoff_pct;
+    *window = g_window;
+}
+
+void MwwResetSensitivity() {
+    {
+        Settings settings("mww", true);
+        settings.EraseKey("cutoff");
+        settings.EraseKey("window");
+    }
+    g_loaded = true;
+    g_cutoff_pct = CONFIG_MICRO_WAKE_WORD_CUTOFF;
+    g_window = CONFIG_MICRO_WAKE_WORD_WINDOW;
+}
 
 MicroWakeWord::MicroWakeWord() {}
 
@@ -51,8 +97,8 @@ MicroWakeWord::~MicroWakeWord() {
 bool MicroWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* /*models_list*/) {
     codec_ = codec;
     wake_word_text_ = CONFIG_MICRO_WAKE_WORD_DISPLAY;
-    cutoff_ = static_cast<uint8_t>(std::min(255, CONFIG_MICRO_WAKE_WORD_CUTOFF * 255 / 100));
-    window_.assign(std::max(1, CONFIG_MICRO_WAKE_WORD_WINDOW), 0);
+    LoadSavedSensitivity();
+    ApplySensitivity();
 
     // Feature frontend: identical settings to ESPHome's preprocessor (the models are trained on these).
     frontend_config_.window.size_ms = kFeatureWindowMs;
@@ -210,7 +256,22 @@ bool MicroWakeWord::GenerateFeatures(const int16_t* samples, size_t count, int8_
     return true;
 }
 
+void MicroWakeWord::ApplySensitivity() {
+    const int pct = g_cutoff_pct.load();
+    const int win = g_window.load();
+    if (pct == applied_cutoff_pct_ && win == (int)window_.size()) return;
+    const bool first = applied_cutoff_pct_ < 0;
+    applied_cutoff_pct_ = pct;
+    cutoff_ = static_cast<uint8_t>(std::min(255, pct * 255 / 100));
+    window_.assign(std::max(1, win), 0);
+    window_index_ = 0;
+    if (!first) {
+        ESP_LOGI(TAG, "Sensitivity now: cutoff %.2f, window %d", cutoff_ / 255.0f, (int)window_.size());
+    }
+}
+
 void MicroWakeWord::RunInference(const int8_t features[kFeatureSize]) {
+    ApplySensitivity();   // cheap unless the MCP tool changed it
     TfLiteTensor* input = interpreter_->input(0);
     stride_step_ %= stride_;
     std::memcpy(input->data.int8 + kFeatureSize * stride_step_, features, kFeatureSize);

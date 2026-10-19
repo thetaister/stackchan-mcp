@@ -53,6 +53,9 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include <freertos/semphr.h>
 #include "esp_video.h"
 #include <cJSON.h>
+#if CONFIG_USE_MICRO_WAKE_WORD
+#include "audio/wake_words/micro_wake_word_settings.h"
+#endif
 #include <lvgl.h>
 #include <algorithm>
 #include <atomic>
@@ -6119,6 +6122,47 @@ private:
                 return std::string("{\"ok\":true,\"seconds\":") + std::to_string(secs) +
                        ",\"rssi\":" + std::to_string(rssi) + "}";
             });
+
+#if CONFIG_USE_MICRO_WAKE_WORD
+        // Mochi v12: live wake word sensitivity (saved in NVS, survives reboots).
+        mcp_server.AddTool(
+            "self.wake_word.set_sensitivity",
+            "Tune the 'hey mochi' wake word. cutoff (50-99, percent): lower = more sensitive, more "
+            "false wakes. window (1-10): how many ~30 ms model outputs are averaged; lower catches "
+            "shorter, softer wakes. Saved across reboots. reset=true restores the build defaults.",
+            PropertyList({
+                Property("cutoff", kPropertyTypeInteger, CONFIG_MICRO_WAKE_WORD_CUTOFF, 50, 99),
+                Property("window", kPropertyTypeInteger, CONFIG_MICRO_WAKE_WORD_WINDOW, 1, 10),
+                Property("reset", kPropertyTypeBoolean, false)
+            }),
+            [](const PropertyList& properties) -> ReturnValue {
+                int old_c = 0, old_w = 0;
+                MwwGetSensitivity(&old_c, &old_w);
+                if (properties["reset"].value<bool>()) {
+                    MwwResetSensitivity();
+                } else {
+                    MwwSetSensitivity(properties["cutoff"].value<int>(), properties["window"].value<int>());
+                }
+                int c = 0, w = 0;
+                MwwGetSensitivity(&c, &w);
+                ESP_LOGI(TAG, "Wake sensitivity set: cutoff %d%% window %d (was %d%% / %d)", c, w, old_c, old_w);
+                return std::string("{\"ok\":true,\"cutoff\":") + std::to_string(c) + ",\"window\":" +
+                       std::to_string(w) + ",\"previous\":{\"cutoff\":" + std::to_string(old_c) +
+                       ",\"window\":" + std::to_string(old_w) + "}}";
+            });
+
+        mcp_server.AddTool(
+            "self.wake_word.get_sensitivity",
+            "Read the current 'hey mochi' wake word sensitivity (cutoff percent and window size).",
+            PropertyList(),
+            [](const PropertyList&) -> ReturnValue {
+                int c = 0, w = 0;
+                MwwGetSensitivity(&c, &w);
+                return std::string("{\"cutoff\":") + std::to_string(c) + ",\"window\":" + std::to_string(w) +
+                       ",\"default_cutoff\":" + std::to_string(CONFIG_MICRO_WAKE_WORD_CUTOFF) +
+                       ",\"default_window\":" + std::to_string(CONFIG_MICRO_WAKE_WORD_WINDOW) + "}";
+            });
+#endif
 
         mcp_server.AddTool(
             "self.screen.get_off_timeout",
