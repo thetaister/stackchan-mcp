@@ -90,10 +90,15 @@ private:
     uint8_t peak_max_prob_ = 0;
     uint8_t peak_max_avg_ = 0;
     int peak_quiet_slices_ = 0;
+    bool peak_in_cooloff_ = false;
 
     // Wake word audio for the server (same scheme as CustomWakeWord)
     std::vector<int16_t> mono_buffer_;
-    std::deque<std::vector<int16_t>> wake_word_pcm_;
+    // Last ~2 s of mono audio, as a ring buffer in PSRAM (small per-chunk vectors would land in internal SRAM).
+    static constexpr size_t kPcmRingSamples = 16000 * 2;
+    int16_t* pcm_ring_ = nullptr;
+    size_t pcm_write_ = 0;
+    size_t pcm_count_ = 0;
     std::deque<std::vector<uint8_t>> wake_word_opus_;
     std::mutex wake_word_mutex_;
     std::condition_variable wake_word_cv_;

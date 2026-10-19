@@ -24,10 +24,12 @@ constexpr uint8_t kLogFloor = 77;
 // Slices below the floor before a peak counts as finished.
 constexpr int kPeakEndSlices = 10;
 
-uint8_t* AllocPreferInternal(size_t size) {
-    auto* p = static_cast<uint8_t*>(heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+// PSRAM first (ESPHome's default too): internal SRAM is scarce on Mochi (Wi-Fi, LVGL, camera), and the
+// v11 engine test showed free internal SRAM dropping to ~6 KB with the arena there.
+uint8_t* AllocPreferPsram(size_t size) {
+    auto* p = static_cast<uint8_t*>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (p == nullptr) {
-        p = static_cast<uint8_t*>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        p = static_cast<uint8_t*>(heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
     return p;
 }
@@ -43,6 +45,7 @@ MicroWakeWord::~MicroWakeWord() {
     if (frontend_ready_) FrontendFreeStateContents(&frontend_state_);
     if (wake_word_encode_task_stack_ != nullptr) heap_caps_free(wake_word_encode_task_stack_);
     if (wake_word_encode_task_buffer_ != nullptr) heap_caps_free(wake_word_encode_task_buffer_);
+    if (pcm_ring_ != nullptr) heap_caps_free(pcm_ring_);
 }
 
 bool MicroWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* /*models_list*/) {
@@ -75,6 +78,10 @@ bool MicroWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* /*models_list*
 
     if (!LoadModel()) {
         return false;
+    }
+    pcm_ring_ = static_cast<int16_t*>(heap_caps_malloc(kPcmRingSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (pcm_ring_ == nullptr) {
+        ESP_LOGW(TAG, "No PSRAM for the wake word audio buffer; wake word audio upload disabled");
     }
     ESP_LOGI(TAG, "Ready: \"%s\", cutoff %.2f, window %d, arena %u bytes (%s), stride %d",
              wake_word_text_.c_str(), cutoff_ / 255.0f, (int)window_.size(), (unsigned)tensor_arena_size_,
@@ -113,7 +120,7 @@ bool MicroWakeWord::LoadModel() {
     op_resolver_.AddPack();
     op_resolver_.AddSplitV();
 
-    var_arena_ = AllocPreferInternal(kVarArenaSize);
+    var_arena_ = AllocPreferPsram(kVarArenaSize);
     if (var_arena_ == nullptr) {
         ESP_LOGE(TAG, "Could not allocate the variable arena");
         return false;
@@ -123,7 +130,7 @@ bool MicroWakeWord::LoadModel() {
     const size_t base = (CONFIG_MICRO_WAKE_WORD_ARENA_SIZE + 15) & ~size_t(15);
     const size_t attempts[] = {base, (base * 3 / 2 + 15) & ~size_t(15), (base * 2 + 15) & ~size_t(15)};
     for (size_t size : attempts) {
-        tensor_arena_ = AllocPreferInternal(size);
+        tensor_arena_ = AllocPreferPsram(size);
         if (tensor_arena_ == nullptr) continue;
         var_allocator_ = tflite::MicroAllocator::Create(var_arena_, kVarArenaSize);
         mrv_ = tflite::MicroResourceVariables::Create(var_allocator_, 20);
@@ -168,6 +175,7 @@ void MicroWakeWord::ResetProbabilities() {
     peak_max_prob_ = 0;
     peak_max_avg_ = 0;
     peak_quiet_slices_ = 0;
+    peak_in_cooloff_ = false;
 }
 
 void MicroWakeWord::Start() {
@@ -206,6 +214,10 @@ void MicroWakeWord::RunInference(const int8_t features[kFeatureSize]) {
     TfLiteTensor* input = interpreter_->input(0);
     stride_step_ %= stride_;
     std::memcpy(input->data.int8 + kFeatureSize * stride_step_, features, kFeatureSize);
+    // Cool-off after start or a detection counts 10 ms feature slices (as ESPHome does), so it lasts ~1 s.
+    if (window_[window_index_] < cutoff_) {
+        ignore_slices_ = std::min(ignore_slices_ + 1, 0);
+    }
     if (++stride_step_ < stride_) {
         return;   // the model consumes `stride_` slices per invocation
     }
@@ -216,9 +228,6 @@ void MicroWakeWord::RunInference(const int8_t features[kFeatureSize]) {
     const uint8_t prob = interpreter_->output(0)->data.uint8[0];
     window_index_ = (window_index_ + 1) % window_.size();
     window_[window_index_] = prob;
-    if (prob < cutoff_) {
-        ignore_slices_ = std::min(ignore_slices_ + 1, 0);   // cool-off after start or a detection
-    }
 
     uint32_t sum = 0;
     for (uint8_t p : window_) sum += p;
@@ -230,9 +239,11 @@ void MicroWakeWord::RunInference(const int8_t features[kFeatureSize]) {
         peak_quiet_slices_ = 0;
         peak_max_prob_ = std::max(peak_max_prob_, prob);
         peak_max_avg_ = std::max(peak_max_avg_, avg);
+        if (ignore_slices_ < 0) peak_in_cooloff_ = true;
     } else if (peak_open_ && ++peak_quiet_slices_ >= kPeakEndSlices) {
-        ESP_LOGI(TAG, "peak: max %.2f, window avg %.2f (cutoff %.2f) - not detected", peak_max_prob_ / 255.0f,
-                 peak_max_avg_ / 255.0f, cutoff_ / 255.0f);
+        ESP_LOGI(TAG, "peak: max %.2f, window avg %.2f (cutoff %.2f) - not detected%s", peak_max_prob_ / 255.0f,
+                 peak_max_avg_ / 255.0f, cutoff_ / 255.0f, peak_in_cooloff_ ? " (cool-off after start)" : "");
+        peak_in_cooloff_ = false;
         peak_open_ = false;
         peak_max_prob_ = 0;
         peak_max_avg_ = 0;
@@ -277,12 +288,12 @@ void MicroWakeWord::Feed(const std::vector<int16_t>& data) {
 }
 
 void MicroWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
-    if (samples == 0) return;
-    // Keep ~2 s of 10 ms chunks for the wake word audio sent to the server.
-    wake_word_pcm_.emplace_back(data, data + samples);
-    while (wake_word_pcm_.size() > 2000 / kFeatureStepMs) {
-        wake_word_pcm_.pop_front();
+    if (pcm_ring_ == nullptr) return;
+    for (size_t i = 0; i < samples; ++i) {
+        pcm_ring_[pcm_write_] = data[i];
+        pcm_write_ = (pcm_write_ + 1) % kPcmRingSamples;
     }
+    pcm_count_ = std::min(kPcmRingSamples, pcm_count_ + samples);
 }
 
 void MicroWakeWord::EncodeWakeWordData() {
@@ -306,10 +317,12 @@ void MicroWakeWord::EncodeWakeWordData() {
             auto ret = esp_opus_enc_open(&opus_enc_cfg, sizeof(esp_opus_enc_config_t), &encoder_handle);
             if (encoder_handle == nullptr) {
                 ESP_LOGE(TAG, "Failed to create audio encoder, error code: %d", ret);
-                std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
-                this_->wake_word_opus_.push_back(std::vector<uint8_t>());
-                this_->wake_word_cv_.notify_all();
-                vTaskDelete(NULL);
+                {
+                    std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
+                    this_->wake_word_opus_.push_back(std::vector<uint8_t>());
+                    this_->wake_word_cv_.notify_all();
+                }
+                vTaskDelete(NULL);   // never returns; the lock above is already released
                 return;
             }
             int frame_size = 0;
@@ -320,11 +333,18 @@ void MicroWakeWord::EncodeWakeWordData() {
             std::vector<int16_t> in_buffer;
             esp_audio_enc_in_frame_t in = {};
             esp_audio_enc_out_frame_t out = {};
-            for (auto& pcm : this_->wake_word_pcm_) {
-                in_buffer.insert(in_buffer.end(), pcm.begin(), pcm.end());
-                while ((int)in_buffer.size() >= frame_size) {
+            // Oldest-first copy out of the PSRAM ring (one big vector, so it is allocated in PSRAM too).
+            if (this_->pcm_ring_ != nullptr && this_->pcm_count_ > 0) {
+                const size_t n = this_->pcm_count_;
+                const size_t start = (this_->pcm_write_ + kPcmRingSamples - n) % kPcmRingSamples;
+                in_buffer.resize(n);
+                for (size_t i = 0; i < n; ++i) in_buffer[i] = this_->pcm_ring_[(start + i) % kPcmRingSamples];
+            }
+            size_t pos = 0;
+            {
+                while (in_buffer.size() - pos >= (size_t)frame_size) {
                     std::vector<uint8_t> opus_buf(outbuf_size);
-                    in.buffer = (uint8_t*)(in_buffer.data());
+                    in.buffer = (uint8_t*)(in_buffer.data() + pos);
                     in.len = (uint32_t)(frame_size * sizeof(int16_t));
                     out.buffer = opus_buf.data();
                     out.len = outbuf_size;
@@ -338,10 +358,10 @@ void MicroWakeWord::EncodeWakeWordData() {
                     } else {
                         ESP_LOGE(TAG, "Failed to encode audio, error code: %d", ret);
                     }
-                    in_buffer.erase(in_buffer.begin(), in_buffer.begin() + frame_size);
+                    pos += frame_size;
                 }
             }
-            this_->wake_word_pcm_.clear();
+            this_->pcm_count_ = 0;
             esp_opus_enc_close(encoder_handle);
             auto end_time = esp_timer_get_time();
             ESP_LOGI(TAG, "Encode wake word opus %d packets in %ld ms", packets,
