@@ -875,6 +875,9 @@ endif()
 if(CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32P4)
     list(APPEND SOURCES "audio/wake_words/afe_wake_word.cc")
     list(APPEND SOURCES "audio/wake_words/custom_wake_word.cc")
+    if(CONFIG_USE_MICRO_WAKE_WORD)
+        list(APPEND SOURCES "audio/wake_words/micro_wake_word.cc")
+    endif()
 else()
     list(APPEND SOURCES "audio/wake_words/esp_wake_word.cc")
 endif()
@@ -1055,6 +1058,18 @@ idf_component_register(SRCS ${SOURCES}
                         smooth_ui_toolkit
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
+
+# Mochi build: embed the microWakeWord model under a fixed name (symbol _binary_mww_model_tflite_start).
+if(CONFIG_USE_MICRO_WAKE_WORD)
+    set(MWW_MODEL_SRC "${CMAKE_CURRENT_SOURCE_DIR}/${CONFIG_MICRO_WAKE_WORD_MODEL}")
+    if(NOT EXISTS "${MWW_MODEL_SRC}")
+        message(FATAL_ERROR "microWakeWord model not found: ${MWW_MODEL_SRC}")
+    endif()
+    configure_file("${MWW_MODEL_SRC}" "${CMAKE_BINARY_DIR}/mww_model.tflite" COPYONLY)
+    target_add_binary_data(${COMPONENT_LIB} "${CMAKE_BINARY_DIR}/mww_model.tflite" BINARY)
+    message(STATUS "microWakeWord model: ${CONFIG_MICRO_WAKE_WORD_MODEL}")
+endif()
+
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME
 # If BOARD_NAME is empty, use BOARD_TYPE

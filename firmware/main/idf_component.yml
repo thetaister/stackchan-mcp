@@ -36,6 +36,19 @@ dependencies:
   espressif/led_strip: ~3.0.2
   espressif/esp_codec_dev: ~1.5.6
   espressif/esp-sr: ~2.3.0
+  # Mochi build: microWakeWord (same versions ESPHome pins)
+  espressif/esp-tflite-micro:
+    version: 1.3.3~1
+    rules:
+    - if: target in [esp32s3]
+  espressif/esp-nn:
+    version: 1.1.2
+    rules:
+    - if: target in [esp32s3]
+  esphome/esp-micro-speech-features:
+    version: 1.2.3
+    rules:
+    - if: target in [esp32s3]
   espressif/button: ~4.1.5
   espressif/knob: ^1.0.0
   espressif/esp32-camera:

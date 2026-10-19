@@ -863,7 +863,45 @@ choice WAKE_WORD_TYPE
         help
             Requires ESP32 S3 and PSRAM
 
+    config USE_MICRO_WAKE_WORD
+        bool "microWakeWord (TFLite Micro streaming model)"
+        depends on IDF_TARGET_ESP32S3 && SPIRAM
+        help
+            Mochi build: continuous wake word detection with a microWakeWord model
+            (ported from ESPHome). The model file is embedded in the app.
+
 endchoice
+
+config MICRO_WAKE_WORD_MODEL
+    string "microWakeWord model file (relative to main/)"
+    default "assets/mww/okay_nabu.tflite"
+    depends on USE_MICRO_WAKE_WORD
+
+config MICRO_WAKE_WORD_DISPLAY
+    string "microWakeWord display text"
+    default "hey mochi"
+    depends on USE_MICRO_WAKE_WORD
+    help
+        Wake word text reported to the app and server on detection.
+
+config MICRO_WAKE_WORD_CUTOFF
+    int "microWakeWord probability cutoff (%)"
+    default 97
+    range 1 99
+    depends on USE_MICRO_WAKE_WORD
+    help
+        Detection fires when the average probability over the sliding window exceeds this.
+
+config MICRO_WAKE_WORD_WINDOW
+    int "microWakeWord sliding window size"
+    default 5
+    range 1 30
+    depends on USE_MICRO_WAKE_WORD
+
+config MICRO_WAKE_WORD_ARENA_SIZE
+    int "microWakeWord tensor arena size (bytes, from the model manifest)"
+    default 26080
+    depends on USE_MICRO_WAKE_WORD
 
 config CUSTOM_WAKE_WORD
     string "Custom Wake Word"
@@ -890,14 +928,14 @@ config CUSTOM_WAKE_WORD_THRESHOLD
 config SEND_WAKE_WORD_DATA
     bool "Send Wake Word Data"
     default y
-    depends on USE_AFE_WAKE_WORD || USE_CUSTOM_WAKE_WORD
+    depends on USE_AFE_WAKE_WORD || USE_CUSTOM_WAKE_WORD || USE_MICRO_WAKE_WORD
     help
         Send wake word data to the server as the first message of the conversation and wait for response
 
 config WAKE_WORD_DETECTION_IN_LISTENING
     bool "Enable Wake Word Detection in Listening Mode"
     default n
-    depends on USE_AFE_WAKE_WORD || USE_CUSTOM_WAKE_WORD
+    depends on USE_AFE_WAKE_WORD || USE_CUSTOM_WAKE_WORD || USE_MICRO_WAKE_WORD
     help
         Enable wake word detection while in listening mode.
         When enabled, the device can detect wake word during listening,

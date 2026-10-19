@@ -32,6 +32,9 @@
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
 #include "wake_words/afe_wake_word.h"
 #include "wake_words/custom_wake_word.h"
+#if CONFIG_USE_MICRO_WAKE_WORD
+#include "wake_words/micro_wake_word.h"
+#endif
 #else
 #include "wake_words/esp_wake_word.h"
 #endif
@@ -89,6 +92,15 @@ void AudioService::Initialize(AudioCodec* codec) {
         esp_opus_enc_get_frame_size(opus_encoder_, &encoder_frame_size_, &encoder_outbuf_size_);
         encoder_frame_size_ = encoder_frame_size_ / sizeof(int16_t);
     }
+
+#if CONFIG_USE_MICRO_WAKE_WORD
+    wake_word_ = std::make_unique<MicroWakeWord>();
+    wake_word_->OnWakeWordDetected([this](const std::string& wake_word) {
+        if (callbacks_.on_wake_word_detected) {
+            callbacks_.on_wake_word_detected(wake_word);
+        }
+    });
+#endif
 
     if (codec->input_sample_rate() != 16000) {
         esp_ae_rate_cvt_cfg_t input_resampler_cfg = RATE_CVT_CFG(
@@ -945,6 +957,10 @@ void AudioService::CheckAndUpdateAudioPowerState() {
 
 void AudioService::SetModelsList(srmodel_list_t* models_list) {
     models_list_ = models_list;
+#if CONFIG_USE_MICRO_WAKE_WORD
+    // Mochi build: microWakeWord does not use esp-sr models; it is created in Initialize().
+    return;
+#endif
 
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
     if (esp_srmodel_filter(models_list_, ESP_MN_PREFIX, NULL) != nullptr) {
