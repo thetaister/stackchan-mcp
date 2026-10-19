@@ -759,7 +759,9 @@ private:
     // ---- Mochi v8: link-health icon (top-right, above the face and any panel) ----
     // Dot: green = data from the gateway within 10 s; amber = 10 s+ silence or weak signal; red = not connected.
     // Bars: Wi-Fi strength (same -60/-70 dBm thresholds as get_device_info). Updated every second.
+    // Mochi v10: bars only appear while the signal is weak (below -67 dBm; hidden again at -64 or better).
     lv_obj_t* link_icon_ = nullptr;
+    bool link_bars_shown_ = false;
     lv_obj_t* link_dot_ = nullptr;
     lv_obj_t* link_bars_[3] = {nullptr, nullptr, nullptr};
     esp_timer_handle_t link_timer_ = nullptr;
@@ -847,6 +849,7 @@ private:
                 lv_obj_set_style_bg_color(b, lv_color_hex(0x505050), 0);
                 lv_obj_align(b, LV_ALIGN_BOTTOM_LEFT, 13 + i * 7, -2);
                 lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);              // v10: shown only when weak
                 link_bars_[i] = b;
             }
         }
@@ -886,8 +889,13 @@ private:
         if (link_icon_ == nullptr || display_ == nullptr) return;
         DisplayLockGuard lock(display_);
         lv_obj_set_style_bg_color(link_dot_, lv_color_hex(dot), 0);
+        // v10: bars only while weak, with hysteresis so they don't flicker around the edge.
+        if (!link_bars_shown_ && rssi < -67) link_bars_shown_ = true;
+        else if (link_bars_shown_ && rssi >= -64) link_bars_shown_ = false;
         for (int i = 0; i < 3; ++i) {
             lv_obj_set_style_bg_color(link_bars_[i], lv_color_hex(i < bars ? 0xF0F0F0 : 0x505050), 0);
+            if (link_bars_shown_) lv_obj_clear_flag(link_bars_[i], LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_add_flag(link_bars_[i], LV_OBJ_FLAG_HIDDEN);
         }
         lv_obj_move_foreground(link_icon_);                               // stay above panels
         UpdateWifiMeterLocked(rssi, silence);                             // Mochi v9
