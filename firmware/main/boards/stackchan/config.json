@@ -11,10 +11,10 @@
                 "CONFIG_CAMERA_GC0308_DVP_YUV422_320X240_20FPS=y",
                 "CONFIG_STACKCHAN_SERVO_FEETECH=y",
                 "CONFIG_USE_MICRO_WAKE_WORD=y",
-                "CONFIG_MICRO_WAKE_WORD_MODEL=\"assets/mww/hey_mochi.tflite\"",
+                "CONFIG_MICRO_WAKE_WORD_MODEL=\"assets/mww/hey_mochi_v2.tflite\"",
                 "CONFIG_MICRO_WAKE_WORD_DISPLAY=\"hey mochi\"",
-                "CONFIG_MICRO_WAKE_WORD_CUTOFF=90",
-                "CONFIG_MICRO_WAKE_WORD_WINDOW=5",
+                "CONFIG_MICRO_WAKE_WORD_CUTOFF=80",
+                "CONFIG_MICRO_WAKE_WORD_WINDOW=3",
                 "CONFIG_MICRO_WAKE_WORD_ARENA_SIZE=30000",
                 "CONFIG_SR_MN_CN_NONE=y",
                 "CONFIG_SR_MN_EN_NONE=y"
