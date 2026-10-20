@@ -83,8 +83,11 @@ bool Protocol::IsTimeout() const {
     auto now = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_incoming_time_);
     bool timeout = duration.count() > kTimeoutSeconds;
-    if (timeout) {
-        ESP_LOGE(TAG, "Channel timeout %ld seconds", (long)duration.count());
+    // Mochi build: log once per timeout episode, not on every call (CanEnterSleepMode() asks every second,
+    // which printed this line ~21,000 times a night while idle).
+    if (timeout && !timeout_logged_) {
+        ESP_LOGW(TAG, "Channel timeout %ld seconds (audio session idle; logged once)", (long)duration.count());
     }
+    timeout_logged_ = timeout;
     return timeout;
 }
