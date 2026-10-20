@@ -8133,7 +8133,11 @@ public:
         }
 
         if (strcmp(mode_j->valuestring, "panel") == 0) {
-            StartPanelFetch(root, req_checksum);
+            StartPanelFetch(root, req_checksum, false);
+            return;
+        }
+        if (strcmp(mode_j->valuestring, "panel_rle") == 0) {   // Mochi v15: run-length coded panel (~7x smaller)
+            StartPanelFetch(root, req_checksum, true);
             return;
         }
 
@@ -8218,9 +8222,11 @@ public:
         std::string token;
         std::string expected_sha256;
         uint32_t duration_ms;
+        bool rle = false;          // payload is RLE1-coded; decodes to PANEL_BYTES
+        size_t size = PANEL_BYTES; // bytes to download
     };
 
-    void StartPanelFetch(const cJSON* root, const std::string& req_checksum) {
+    void StartPanelFetch(const cJSON* root, const std::string& req_checksum, bool rle) {
         auto hide_j = cJSON_GetObjectItem(root, "hide");
         if (cJSON_IsTrue(hide_j)) {   // {"mode":"panel","hide":true}: take the panel down now
             HidePanel();
@@ -8235,7 +8241,9 @@ public:
             SendAvatarSetLoadedError(req_checksum, "missing_fields");
             return;
         }
-        if (static_cast<size_t>(size_j->valuedouble) != PANEL_BYTES) {
+        const size_t size = static_cast<size_t>(size_j->valuedouble);
+        // RLE1 worst case is slightly larger than raw (2-byte token per 32767 literal pixels + 8-byte header).
+        if (rle ? (size < 12 || size > PANEL_BYTES + 64) : size != PANEL_BYTES) {
             SendAvatarSetLoadedError(req_checksum, "size_mismatch");
             return;
         }
@@ -8251,7 +8259,7 @@ public:
             duration_ms = static_cast<uint32_t>(d);
         }
         auto* ctx = new PanelFetchContext{this, url->valuestring, token->valuestring,
-                                          req_checksum, duration_ms};
+                                          req_checksum, duration_ms, rle, size};
         BaseType_t ok = xTaskCreate(&StackChanBoard::PanelFetchTaskTrampoline,
                                     "panel_fetch", 8192, ctx, tskIDLE_PRIORITY + 2, nullptr);
         if (ok != pdPASS) {
@@ -8270,7 +8278,8 @@ public:
 
     void RunPanelFetch(const PanelFetchContext* ctx) {
         std::string actual, err;
-        uint8_t* buf = AvatarSetFetcher::FetchRaw(ctx->url, ctx->token, PANEL_BYTES,
+        const int64_t t0 = esp_timer_get_time();
+        uint8_t* buf = AvatarSetFetcher::FetchRaw(ctx->url, ctx->token, ctx->size,
                                                   ctx->expected_sha256, actual, err);
         panel_fetch_in_progress_.store(false, std::memory_order_release);
         const std::string& correlation = actual.empty() ? ctx->expected_sha256 : actual;
@@ -8279,6 +8288,20 @@ public:
             SendAvatarSetLoaded(false, correlation, err);
             return;
         }
+        if (ctx->rle) {   // decode into a fresh PSRAM buffer of the full panel size
+            uint8_t* raw = static_cast<uint8_t*>(heap_caps_malloc(PANEL_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            const bool ok = raw != nullptr && DecodeRle1(buf, ctx->size, raw, PANEL_BYTES);
+            heap_caps_free(buf);
+            if (!ok) {
+                if (raw != nullptr) heap_caps_free(raw);
+                ESP_LOGW(TAG, "Panel RLE decode failed (%u bytes)", (unsigned)ctx->size);
+                SendAvatarSetLoaded(false, correlation, raw == nullptr ? "psram_oom" : "rle_decode_failed");
+                return;
+            }
+            buf = raw;
+        }
+        ESP_LOGI(TAG, "Panel fetched: %u bytes%s in %lld ms", (unsigned)ctx->size, ctx->rle ? " (rle)" : "",
+                 (long long)((esp_timer_get_time() - t0) / 1000));
         if (!ShowPanel(buf, ctx->duration_ms)) {
             heap_caps_free(buf);
             SendAvatarSetLoaded(false, correlation, "display_not_ready");
