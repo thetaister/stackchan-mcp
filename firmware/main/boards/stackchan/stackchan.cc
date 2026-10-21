@@ -1218,7 +1218,9 @@ private:
     //      into motion interpolation.
     //   3. The set_head_angles MCP handler additionally clamps the
     //      request target so the original out-of-range value is logged.
-    static constexpr int SAFE_PITCH_MIN = 0;
+    // Mochi v16: level is pitch -17 on Tai's unit (measured with torque off, 2026-10-21); the head reaches it
+    // freely, so the hard floor moves from 0 to -17 (raw 566). Tier 2 recommended range is unchanged.
+    static constexpr int SAFE_PITCH_MIN = -17;
     static constexpr int SAFE_PITCH_MAX = 88;  // Issue #98: validated on real hardware
                                                 // (M5Stack CoreS3 + SCS0009 ×2). On-device
                                                 // sweep observed clean motion at pitch=85
@@ -3730,7 +3732,7 @@ private:
                 // to (yaw=0, pitch=45) drive the head back into the
                 // safe range through the existing speed-limited path.
                 constexpr int PITCH_SAFE_RAW_MIN =
-                    620 + SAFE_PITCH_MIN * 16 / 5;  // raw 620 at deg=0
+                    620 + SAFE_PITCH_MIN * 16 / 5;  // raw 566 at deg=-17 (Mochi v16)
                 constexpr int PITCH_SAFE_RAW_MAX =
                     620 + SAFE_PITCH_MAX * 16 / 5;  // raw 901 at deg=88
                 if (pitch_pos_actual >= PITCH_SAFE_RAW_MIN &&
