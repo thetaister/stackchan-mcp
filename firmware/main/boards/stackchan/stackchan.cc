@@ -878,6 +878,23 @@ private:
         }
     }
 
+    // Mochi v17: the link dot hides while a screen panel is up, as long as the link is healthy (green).
+    // Amber / red still show over panels so a connection problem is never hidden.
+    bool link_dot_ok_ = true;
+    void ApplyLinkIconVisibilityLocked() {
+        if (link_icon_ == nullptr) return;
+        if (panel_visible_.load(std::memory_order_acquire) && link_dot_ok_) {
+            lv_obj_add_flag(link_icon_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(link_icon_, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    void RefreshLinkIconForPanel() {
+        if (link_icon_ == nullptr || display_ == nullptr) return;
+        DisplayLockGuard lock(display_);
+        ApplyLinkIconVisibilityLocked();
+    }
+
     void UpdateLinkIcon() {
         auto& app = Application::GetInstance();
         const uint32_t silence = app.GetLinkSilenceMs();
@@ -904,6 +921,8 @@ private:
         if (link_icon_ == nullptr || display_ == nullptr) return;
         DisplayLockGuard lock(display_);
         lv_obj_set_style_bg_color(link_dot_, lv_color_hex(dot), 0);
+        link_dot_ok_ = (dot == 0x40D070);
+        ApplyLinkIconVisibilityLocked();
         // v10: bars only while weak, with hysteresis so they don't flicker around the edge.
         if (!link_bars_shown_ && rssi < -67) link_bars_shown_ = true;
         else if (link_bars_shown_ && rssi >= -64) link_bars_shown_ = false;
@@ -8342,6 +8361,7 @@ public:
             if (old != nullptr) heap_caps_free(old);
         }
         panel_visible_.store(true, std::memory_order_release);
+        RefreshLinkIconForPanel();                                         // Mochi v17
         if (panel_hide_timer_ == nullptr) {
             esp_timer_create_args_t args = {
                 .callback = &StackChanBoard::PanelHideCb,
@@ -8382,6 +8402,7 @@ public:
             }
         }
         panel_visible_.store(false, std::memory_order_release);
+        RefreshLinkIconForPanel();                                         // Mochi v17
         ESP_LOGI(TAG, "Panel hidden");
     }
 
