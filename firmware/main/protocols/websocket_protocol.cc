@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cJSON.h>
 #include <esp_log.h>
+#include <esp_ota_ops.h>
 #include <arpa/inet.h>
 #include <algorithm>
 #include <vector>
@@ -958,5 +959,13 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root,
     // CloseAudioChannel() would silently re-open the audio session.
     audio_channel_open_.store(arm_audio_channel);
     intentional_close_.store(false);
+    {   // Mochi v19: a firmware that has reached the gateway is good - keep it (cancels the OTA rollback)
+        const esp_partition_t* run = esp_ota_get_running_partition();
+        esp_ota_img_states_t st;
+        if (run != nullptr && esp_ota_get_state_partition(run, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY) {
+            esp_ota_mark_app_valid_cancel_rollback();
+            ESP_LOGW(TAG, "Firmware confirmed (reached the gateway); rollback cancelled");
+        }
+    }
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 }

@@ -270,6 +270,7 @@ class Gateway:
             "matrix":  90 * kimg_bytes,   # 3_456_000
             "panel":   320 * 240 * 2,     # 153_600  STACKCHAN-LOCAL-PATCH panel
             "matrix_rle": len(payload),   # STACKCHAN-LOCAL-PATCH rle (checked above)
+            "firmware": len(payload) if payload[:1] == b"\xe9" and 65536 <= len(payload) <= 0x3F0000 else -1,  # STACKCHAN-LOCAL-PATCH fwota: an ESP app image
         }.get(mode)
         if expected is None:
             return {"ok": False, "error": f"unknown_mode: {mode}"}

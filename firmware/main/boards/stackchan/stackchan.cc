@@ -33,6 +33,9 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #include "avatar_images.h"
 #include "avatar_set.h"
 #include "avatar_set_fetcher.h"
+#include "net_log.h"            // Mochi v19: log lines also over Wi-Fi
+#include <esp_ota_ops.h>
+#include <mbedtls/sha256.h>
 
 #include <smooth_ui_toolkit.hpp>
 #include <esp_log.h>
@@ -8044,6 +8047,7 @@ private:
 
 public:
     StackChanBoard() {
+        netlog::Start();   // Mochi v19: copy every log line to the gateway PC over Wi-Fi (UDP 8771) once Wi-Fi is up
         InitializePowerSaveTimer();
         InitializeI2c();
         InitializePortAI2c();
@@ -8185,6 +8189,10 @@ public:
             return;
         }
 
+        if (strcmp(mode_j->valuestring, "firmware") == 0) {   // Mochi v19: firmware update over Wi-Fi
+            StartFirmwareOta(url->valuestring, token->valuestring, static_cast<size_t>(size_j->valuedouble), req_checksum);
+            return;
+        }
         if (strcmp(mode_j->valuestring, "panel") == 0) {
             StartPanelFetch(root, req_checksum, false);
             return;
@@ -8670,6 +8678,90 @@ public:
         // restoration happens last so a successful fetch doesn't restart
         // blink if the user disabled it mid-fetch.
         ApplyPendingAvatarAfterFetch();
+    }
+
+    // ---- Mochi v19: firmware update over Wi-Fi ------------------------------
+    // The gateway stages the app image like an avatar set (mode "firmware") and the robot streams it into the spare
+    // OTA slot, checking its sha256 on the way. Only a complete, verified image is made the boot slot; then she
+    // restarts. With rollback on, the new image must reach the gateway once (server hello) to stay; else the
+    // bootloader goes back to the old slot on the next restart.
+    struct OtaContext { std::string url, token, checksum; size_t size; };
+
+    void StartFirmwareOta(const std::string& url, const std::string& token, size_t size, const std::string& checksum) {
+        if (avatar_fetch_in_progress_.exchange(true, std::memory_order_acq_rel)) {
+            SendAvatarSetLoadedError(checksum, "fetch_in_progress");
+            return;
+        }
+        auto* ctx = new OtaContext{url, token, checksum, size};
+        if (xTaskCreate(&StackChanBoard::OtaTaskTrampoline, "fw_ota", 8192, ctx, tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+            delete ctx;
+            avatar_fetch_in_progress_.store(false, std::memory_order_release);
+            SendAvatarSetLoadedError(checksum, "task_create_failed");
+        }
+    }
+
+    static void OtaTaskTrampoline(void* arg) {
+        auto* ctx = static_cast<OtaContext*>(arg);
+        auto& board = static_cast<StackChanBoard&>(Board::GetInstance());
+        const std::string err = board.RunFirmwareOta(*ctx);
+        board.avatar_fetch_in_progress_.store(false, std::memory_order_release);
+        if (err.empty()) {
+            SendAvatarSetLoaded(true, ctx->checksum, "");
+            ESP_LOGW(TAG, "Firmware update written and verified; restarting into it");
+            delete ctx;
+            vTaskDelay(pdMS_TO_TICKS(1500));
+            esp_restart();
+        }
+        ESP_LOGE(TAG, "Firmware update failed: %s", err.c_str());
+        SendAvatarSetLoadedError(ctx->checksum, err);
+        delete ctx;
+        vTaskDelete(nullptr);
+    }
+
+    std::string RunFirmwareOta(const OtaContext& ctx) {
+        const esp_partition_t* part = esp_ota_get_next_update_partition(nullptr);
+        if (part == nullptr) return "no_update_slot";
+        if (ctx.size < 64 * 1024 || ctx.size > part->size) return "bad_size";
+        auto network = GetNetwork();
+        auto http = network != nullptr ? network->CreateHttp(0) : nullptr;
+        if (http == nullptr) return "http_open_failed";
+        http->SetHeader("Authorization", std::string("Bearer ") + ctx.token);
+        http->SetHeader("Accept", "application/octet-stream");
+        if (!http->Open("GET", ctx.url)) return "http_open_failed";
+        if (http->GetBodyLength() != ctx.size) { http->Close(); return "content_length_mismatch"; }
+        esp_ota_handle_t ota = 0;
+        if (esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ota) != ESP_OK) { http->Close(); return "ota_begin_failed"; }
+        ESP_LOGW(TAG, "Firmware update: %u bytes into %s", (unsigned)ctx.size, part->label);
+        mbedtls_sha256_context sha;
+        mbedtls_sha256_init(&sha);
+        mbedtls_sha256_starts(&sha, 0);
+        constexpr size_t kChunk = 4096;
+        char* buf = static_cast<char*>(heap_caps_malloc(kChunk, MALLOC_CAP_INTERNAL));
+        std::string err;
+        size_t total = 0, next_log = 512 * 1024;
+        if (buf == nullptr) err = "oom";
+        while (err.empty() && total < ctx.size) {
+            const int n = http->Read(buf, std::min(kChunk, ctx.size - total));
+            if (n <= 0) { err = "read_failed"; break; }
+            mbedtls_sha256_update(&sha, reinterpret_cast<const unsigned char*>(buf), n);
+            if (esp_ota_write(ota, buf, n) != ESP_OK) { err = "ota_write_failed"; break; }
+            total += n;
+            if (total >= next_log) { ESP_LOGI(TAG, "Firmware update: %u / %u bytes", (unsigned)total, (unsigned)ctx.size); next_log += 512 * 1024; }
+        }
+        http->Close();
+        if (buf) heap_caps_free(buf);
+        unsigned char hash[32];
+        mbedtls_sha256_finish(&sha, hash);
+        mbedtls_sha256_free(&sha);
+        if (err.empty()) {
+            char hex[65];
+            for (int i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", hash[i]);
+            if (!ctx.checksum.empty() && ctx.checksum != std::string("sha256:") + hex) err = "checksum_mismatch";
+        }
+        if (!err.empty()) { esp_ota_abort(ota); return err; }
+        if (esp_ota_end(ota) != ESP_OK) return "image_invalid";
+        if (esp_ota_set_boot_partition(part) != ESP_OK) return "set_boot_failed";
+        return "";
     }
 
     static void SendAvatarSetLoaded(

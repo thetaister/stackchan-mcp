@@ -216,7 +216,7 @@ async def stage_avatar_set(
     The staging entry is consumed on the first successful fetch and
     GC'd after AVATAR_SET_STAGING_TTL_SEC if never fetched.
     """
-    if mode not in ("layered", "matrix", "panel", "matrix_rle"):  # STACKCHAN-LOCAL-PATCH panel rle
+    if mode not in ("layered", "matrix", "panel", "matrix_rle", "firmware"):  # STACKCHAN-LOCAL-PATCH panel rle fwota
         raise ValueError(f"unknown avatar mode: {mode}")
 
     short_id = secrets.token_hex(8)

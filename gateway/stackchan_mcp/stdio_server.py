@@ -887,7 +887,7 @@ async def _dispatch_mcp_tool(
                     ),
                 )
             ]
-        if mode not in ("layered", "matrix", "panel", "matrix_rle"):  # STACKCHAN-LOCAL-PATCH panel rle
+        if mode not in ("layered", "matrix", "panel", "matrix_rle", "firmware"):  # STACKCHAN-LOCAL-PATCH panel rle fwota
             return [
                 TextContent(
                     type="text",
@@ -2891,7 +2891,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                         "mode": {
                             "type": "string",
-                            "enum": ["layered", "matrix", "panel", "matrix_rle"],  # STACKCHAN-LOCAL-PATCH panel rle
+                            "enum": ["layered", "matrix", "panel", "matrix_rle", "firmware"],  # STACKCHAN-LOCAL-PATCH panel rle fwota
                             "description": (
                                 "'layered' (14 frames, ~525 KB) or "
                                 "'matrix' (90 frames, ~3.3 MB)."
