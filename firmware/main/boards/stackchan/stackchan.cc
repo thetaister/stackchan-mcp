@@ -1055,7 +1055,7 @@ private:
     static constexpr int REACTION_HOLD_MS = 3000;
     static constexpr uint8_t TOUCH_MIN_LEVEL = 1;  // v21: any level (v20 had M; the chip threshold is raised instead)
     static constexpr int PAT_MAX_MS = 3000;        // v21: a press longer than this is the pad, not a pat
-    static constexpr int STROKE_GAP_MS = 15000;    // v21: at most one stroke reaction per 15 s (no chains)
+    static constexpr int STROKE_GAP_MS = 4000;     // v26: 4 s (v21 had 15 s: Tai's repeat pats were ignored); no chains
     static constexpr int COOLDOWN_MS      = 800;  // post-reaction noise gate
     // With 2-sample debounce this gives ~200 ms confirm latency, fast enough
     // to catch a quick "pon" (~200 ms press) while still rejecting single-
@@ -5048,7 +5048,7 @@ private:
             }
             if (duration_ms >= STROKE_MIN_MS && last_stroke_us_ != 0 &&
                 now_us < last_stroke_us_ + (uint64_t)STROKE_GAP_MS * 1000ULL) {
-                ESP_LOGI(TAG, "touch ignored: stroke again within 15 s (peak %c, %u ms)", "0LMH"[press_peak_level_ & 3], (unsigned)duration_ms);
+                ESP_LOGI(TAG, "touch ignored: stroke again within 4 s (peak %c, %u ms)", "0LMH"[press_peak_level_ & 3], (unsigned)duration_ms);
                 return;
             }
             if (duration_ms >= STROKE_MIN_MS) {
