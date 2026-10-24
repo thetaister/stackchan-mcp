@@ -557,6 +557,8 @@ private:
 class Si12T : public I2cDevice {
 public:
     static constexpr uint8_t DEFAULT_ADDR = 0x68;  // ID_SEL = GND
+    static constexpr uint8_t SENS_M = 5;     // Mochi v21: middle threshold code (0 most sensitive .. 7 least; reset 3)
+    static constexpr uint8_t RESP_RTC = 5;   // Mochi v21: response period RTC + 2 (reset 2)
 
     struct TouchState {
         bool zone[3];          // CH1, CH2, CH3 — true if any output level set
@@ -588,7 +590,16 @@ public:
             ESP_LOGW("Si12T", "Output1 read 0xFF (likely no device)");
             return false;
         }
-        ESP_LOGI("Si12T", "init OK: ctrl=0x%02X out1=0x%02X (sleep cleared)", ctrl, out1);
+        // Mochi v21 (Tai 24-Oct, phantom pats): less sensitive pads and a slower response. Sensitivity regs
+        // 0x02/0x03 hold two channels each (bit3/7 HL window, bits2-0/6-4 middle threshold; 0 most sensitive,
+        // 7 least, reset 0xBB = 3 + wide). Now 5 + narrow window on CH1-3. CTRL1 0x08: response period = RTC + 2
+        // samples, reset RTC 2; now 5 so a blip has to last longer to count.
+        SafeWriteReg(0x02, (SENS_M << 4) | SENS_M);          // CH2 | CH1, HL = 0 (narrow)
+        SafeWriteReg(0x03, SENS_M);                         // CH3 (CH4 unused)
+        SafeWriteReg(0x08, 0x20 | RESP_RTC);                // FTC 10 s, auto mode, interrupt on middle/high
+        uint8_t s2 = 0, c1 = 0;
+        SafeReadReg(0x02, &s2); SafeReadReg(0x08, &c1);
+        ESP_LOGI("Si12T", "init OK: ctrl=0x%02X out1=0x%02X (sleep cleared); sens=0x%02X ctrl1=0x%02X", ctrl, out1, s2, c1);
         return true;
     }
 
@@ -1042,7 +1053,9 @@ private:
                                                   // gaps that cut a real stroke
                                                   // short of 600 ms.
     static constexpr int REACTION_HOLD_MS = 3000;
-    static constexpr uint8_t TOUCH_MIN_LEVEL = 2;  // Mochi v20: a press must reach level M somewhere to count
+    static constexpr uint8_t TOUCH_MIN_LEVEL = 1;  // v21: any level (v20 had M; the chip threshold is raised instead)
+    static constexpr int PAT_MAX_MS = 3000;        // v21: a press longer than this is the pad, not a pat
+    static constexpr int STROKE_GAP_MS = 15000;    // v21: at most one stroke reaction per 15 s (no chains)
     static constexpr int COOLDOWN_MS      = 800;  // post-reaction noise gate
     // With 2-sample debounce this gives ~200 ms confirm latency, fast enough
     // to catch a quick "pon" (~200 ms press) while still rejecting single-
@@ -1073,6 +1086,7 @@ private:
     // Last reported event for MCP get_touch_state.
     TouchEvent last_event_ = TouchEvent::IDLE;
     uint64_t   last_event_us_ = 0;
+    uint64_t   last_stroke_us_ = 0;       // Mochi v21: for the 15 s gap between stroke reactions
     bool       last_zone_snapshot_[3] = {false, false, false};
     uint8_t    last_output1_raw_ = 0;
     // Press-start snapshot. last_* fields above are overwritten every poll
@@ -4897,6 +4911,7 @@ private:
         LogTouchEvent("STROKE", duration_ms);
         last_event_ = TouchEvent::STROKE;
         last_event_us_ = esp_timer_get_time();
+        last_stroke_us_ = last_event_us_;
         SetAvatarExpressionIfActive("embarrassed");
         StartServoWobble();
         ScheduleIdleRevert();
@@ -5013,6 +5028,15 @@ private:
             // Tai's real pats reached M and H. Faint-only presses are logged and dropped, with no reaction or event.
             if (press_peak_level_ < TOUCH_MIN_LEVEL) {
                 ESP_LOGI(TAG, "touch ignored: faint (peak %c, %u ms)", "0LMH"[press_peak_level_ & 3], (unsigned)duration_ms);
+                return;
+            }
+            if (duration_ms > PAT_MAX_MS) {
+                ESP_LOGI(TAG, "touch ignored: too long (peak %c, %u ms)", "0LMH"[press_peak_level_ & 3], (unsigned)duration_ms);
+                return;
+            }
+            if (duration_ms >= STROKE_MIN_MS && last_stroke_us_ != 0 &&
+                now_us < last_stroke_us_ + (uint64_t)STROKE_GAP_MS * 1000ULL) {
+                ESP_LOGI(TAG, "touch ignored: stroke again within 15 s (peak %c, %u ms)", "0LMH"[press_peak_level_ & 3], (unsigned)duration_ms);
                 return;
             }
             if (duration_ms >= STROKE_MIN_MS) {
