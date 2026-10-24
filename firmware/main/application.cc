@@ -348,8 +348,11 @@ void Application::ActivationTask() {
     // Check for new assets version
     CheckAssetsVersion();
 
-    // Check for new firmware version
-    CheckNewVersion();
+    // Mochi v28 (Tai 25-Oct-2026: 'does anything go to chinese servers'): no version check with the stock
+    // xiaozhi server (api.tenclass.net). It sent her Wi-Fi name, local IP, MAC and a device id at every boot, and a
+    // 'new version' answer would have replaced Mochi's firmware. Her updates come only from Tai's PC (RUN-13 / RUN-56).
+    ota_->MarkCurrentVersionValid();
+    ESP_LOGI(TAG, "Mochi: version check with the stock server skipped");
 
     // Initialize the protocol
     InitializeProtocol();
