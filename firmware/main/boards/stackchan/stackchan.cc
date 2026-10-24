@@ -10,6 +10,8 @@
 #include "mcp_server.h"
 #include "settings.h"
 #include "led_strip.h"
+#include "driver/rmt_tx.h"         // Mochi v27: infrared on Port B (M5Stack IR Unit)
+#include "driver/rmt_rx.h"
 // Issue #79: servo driver is selectable at build time via Kconfig.
 //   - CONFIG_STACKCHAN_SERVO_SCSCL  (default): GPL-3.0 SCServo_lib
 //   - CONFIG_STACKCHAN_SERVO_FEETECH: MIT clean-room driver vendored at
@@ -117,6 +119,111 @@ static inline bool ServoWritePosOk(int r) { return r > 0; }
 #if STACKCHAN_CHARGE_ON_BELOW >= STACKCHAN_CHARGE_OFF_ABOVE
 #error "STACKCHAN_CHARGE_ON_BELOW must be lower than STACKCHAN_CHARGE_OFF_ABOVE"
 #endif
+
+// ---- Mochi v27 (Tai 24-Oct-2026: 'lets do the AC'): infrared through an M5Stack IR Unit on Port B --------------
+// Port B on the CoreS3: GPIO9 = output (the unit's IR LED), GPIO8 = input (its 38 kHz receiver). Raw timings only;
+// the PC builds the aircon's frames (voice\aircon.py) and can read a remote's frames back to check them.
+static constexpr gpio_num_t IR_TX_PIN = GPIO_NUM_9;
+static constexpr gpio_num_t IR_RX_PIN = GPIO_NUM_8;
+
+static std::string IrSend(int carrier_hz, const std::string& csv) {
+    std::vector<uint32_t> d;
+    size_t i = 0;
+    while (i < csv.size()) {
+        while (i < csv.size() && (csv[i] < '0' || csv[i] > '9')) i++;
+        uint32_t v = 0; bool any = false;
+        while (i < csv.size() && csv[i] >= '0' && csv[i] <= '9') { v = v * 10 + (csv[i] - '0'); i++; any = true; }
+        if (any) d.push_back(v > 32767 ? 32767 : v);
+    }
+    if (d.empty() || d.size() > 2000) return "{\"ok\":false,\"error\":\"need 1-2000 durations\"}";
+    std::vector<rmt_symbol_word_t> syms;
+    for (size_t k = 0; k < d.size(); k += 2) {
+        rmt_symbol_word_t w = {};
+        w.duration0 = d[k]; w.level0 = 1;                       // mark: carrier on
+        w.duration1 = (k + 1 < d.size()) ? d[k + 1] : 0; w.level1 = 0;   // space
+        syms.push_back(w);
+    }
+    rmt_channel_handle_t ch = nullptr;
+    rmt_encoder_handle_t enc = nullptr;
+    rmt_tx_channel_config_t cfg = {};
+    cfg.gpio_num = IR_TX_PIN; cfg.clk_src = RMT_CLK_SRC_DEFAULT; cfg.resolution_hz = 1000000;
+    cfg.mem_block_symbols = 48; cfg.trans_queue_depth = 2;
+    esp_err_t err = rmt_new_tx_channel(&cfg, &ch);
+    if (err == ESP_OK) {
+        rmt_carrier_config_t car = {};
+        car.frequency_hz = carrier_hz > 0 ? carrier_hz : 38000; car.duty_cycle = 0.33f;
+        err = rmt_apply_carrier(ch, &car);
+    }
+    rmt_copy_encoder_config_t ec = {};
+    if (err == ESP_OK) err = rmt_new_copy_encoder(&ec, &enc);
+    if (err == ESP_OK) err = rmt_enable(ch);
+    if (err == ESP_OK) {
+        rmt_transmit_config_t tc = {};
+        err = rmt_transmit(ch, enc, syms.data(), syms.size() * sizeof(rmt_symbol_word_t), &tc);
+        if (err == ESP_OK) err = rmt_tx_wait_all_done(ch, 3000);
+        rmt_disable(ch);
+    }
+    if (enc) rmt_del_encoder(enc);
+    if (ch) rmt_del_channel(ch);
+    ESP_LOGI("IR", "send %u durations at %d Hz: %s", (unsigned)d.size(), carrier_hz, esp_err_to_name(err));
+    if (err != ESP_OK) return std::string("{\"ok\":false,\"error\":\"") + esp_err_to_name(err) + "\"}";
+    return std::string("{\"ok\":true,\"durations\":") + std::to_string(d.size()) + "}";
+}
+
+static bool IrRxDone(rmt_channel_handle_t, const rmt_rx_done_event_data_t* ev, void* ctx) {
+    BaseType_t woken = pdFALSE;
+    xQueueSendFromISR((QueueHandle_t)ctx, ev, &woken);
+    return woken == pdTRUE;
+}
+
+static std::string IrCapture(int timeout_ms) {
+    // One frame from a remote pointed at the unit: alternating mark,space durations in microseconds.
+    const size_t N = 1024;
+    rmt_symbol_word_t* buf = (rmt_symbol_word_t*)heap_caps_calloc(N, sizeof(rmt_symbol_word_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!buf) return "{\"ok\":false,\"error\":\"no memory\"}";
+    QueueHandle_t q = xQueueCreate(1, sizeof(rmt_rx_done_event_data_t));
+    rmt_channel_handle_t ch = nullptr;
+    rmt_rx_channel_config_t cfg = {};
+    cfg.gpio_num = IR_RX_PIN; cfg.clk_src = RMT_CLK_SRC_DEFAULT; cfg.resolution_hz = 1000000;
+    cfg.mem_block_symbols = N; cfg.flags.with_dma = 1;
+    esp_err_t err = rmt_new_rx_channel(&cfg, &ch);
+    rmt_rx_event_callbacks_t cbs = {};
+    cbs.on_recv_done = IrRxDone;
+    if (err == ESP_OK) err = rmt_rx_register_event_callbacks(ch, &cbs, q);
+    if (err == ESP_OK) err = rmt_enable(ch);
+    std::string out;
+    if (err == ESP_OK) {
+        rmt_receive_config_t rc = {};
+        rc.signal_range_min_ns = 1000;          // shorter blips are noise
+        rc.signal_range_max_ns = 30000000;      // 30 ms of quiet ends the frame (both copies of an AC frame fit)
+        err = rmt_receive(ch, buf, N * sizeof(rmt_symbol_word_t), &rc);
+        rmt_rx_done_event_data_t ev = {};
+        if (err == ESP_OK && xQueueReceive(q, &ev, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
+            // the receiver output is active-low: level 0 = carrier seen = mark
+            bool started = false;
+            for (size_t k = 0; k < ev.num_symbols; k++) {
+                const rmt_symbol_word_t& w = ev.received_symbols[k];
+                uint32_t dur[2] = {w.duration0, w.duration1}; uint32_t lev[2] = {w.level0, w.level1};
+                for (int h = 0; h < 2; h++) {
+                    if (dur[h] == 0) continue;
+                    if (!started && lev[h] != 0) continue;
+                    started = true;
+                    if (!out.empty()) out += ",";
+                    out += std::to_string(dur[h]);
+                }
+            }
+        } else if (err == ESP_OK) {
+            err = ESP_ERR_TIMEOUT;
+        }
+        rmt_disable(ch);
+    }
+    if (ch) rmt_del_channel(ch);
+    vQueueDelete(q);
+    heap_caps_free(buf);
+    ESP_LOGI("IR", "capture: %s (%u chars)", esp_err_to_name(err), (unsigned)out.size());
+    if (err != ESP_OK) return std::string("{\"ok\":false,\"error\":\"") + esp_err_to_name(err) + "\"}";
+    return std::string("{\"ok\":true,\"durations\":\"") + out + "\"}";
+}
 
 class Pmic : public Axp2101 {
 public:
@@ -6201,6 +6308,25 @@ private:
                 int timeout_seconds = properties["seconds"].value<int>();
                 bool applied = SetScreenOffTimeoutSeconds(timeout_seconds);
                 return GetScreenOffTimeoutJson(applied);
+            });
+
+        mcp_server.AddTool(
+            "self.ir.send",
+            "Mochi v27: send an infrared signal through the IR Unit on Port B. durations: comma-separated "
+            "microseconds, mark first (carrier on), then space, alternating. carrier_hz: usually 38000.",
+            PropertyList({Property("durations", kPropertyTypeString, std::string()),
+                          Property("carrier_hz", kPropertyTypeInteger, 38000, 20000, 60000)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                return IrSend(properties["carrier_hz"].value<int>(), properties["durations"].value<std::string>());
+            });
+
+        mcp_server.AddTool(
+            "self.ir.capture",
+            "Mochi v27: wait up to timeout_ms for one remote-control press at the IR Unit on Port B and "
+            "return its raw timings (mark,space,... in microseconds).",
+            PropertyList({Property("timeout_ms", kPropertyTypeInteger, 8000, 1000, 15000)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                return IrCapture(properties["timeout_ms"].value<int>());
             });
 
         mcp_server.AddTool(
