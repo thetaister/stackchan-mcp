@@ -3104,7 +3104,9 @@ private:
         listening_indicator_ = nullptr;
         listening_indicator_dot_ = nullptr;
 
-        lv_obj_t* screen = lv_screen_active();
+        // Mochi v24 (Tai 24-Oct: 'display red listening dot as overlay every time it listens'): on the top layer,
+        // like the link icon, so it shows over screen panels too (it was on the face screen, under any panel)
+        lv_obj_t* screen = lv_layer_top();
         if (screen == nullptr) {
             return false;
         }
@@ -8440,6 +8442,9 @@ public:
             lv_image_set_src(panel_img_, nullptr);
             lv_image_set_src(panel_img_, &panel_dsc_);
             lv_obj_clear_flag(panel_img_, LV_OBJ_FLAG_HIDDEN);
+            if (listening_indicator_ != nullptr && lv_obj_is_valid(listening_indicator_)) {
+                lv_obj_move_foreground(listening_indicator_);   // v24: a panel loaded mid-listen stays under the dot
+            }
             if (old != nullptr) heap_caps_free(old);
         }
         panel_visible_.store(true, std::memory_order_release);
