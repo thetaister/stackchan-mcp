@@ -1042,6 +1042,7 @@ private:
                                                   // gaps that cut a real stroke
                                                   // short of 600 ms.
     static constexpr int REACTION_HOLD_MS = 3000;
+    static constexpr uint8_t TOUCH_MIN_LEVEL = 2;  // Mochi v20: a press must reach level M somewhere to count
     static constexpr int COOLDOWN_MS      = 800;  // post-reaction noise gate
     // With 2-sample debounce this gives ~200 ms confirm latency, fast enough
     // to catch a quick "pon" (~200 ms press) while still rejecting single-
@@ -1083,6 +1084,7 @@ private:
     // with press judged via debounce, etc.).
     bool       press_start_zones_[3] = {false, false, false};
     uint8_t    press_start_output1_raw_ = 0;
+    uint8_t    press_peak_level_ = 0;      // Mochi v20: strongest channel level seen during the press (0..3)
 
     // Servo wobble sub-state. Keeps the previously-set angles untouched
     // before/after the wobble so that an external set_head_angles call is
@@ -4861,7 +4863,7 @@ private:
     void LogTouchEvent(const char* event_name, uint64_t duration_ms) {
         ESP_LOGI(TAG,
                  "touch event: %s start_zones=%d%d%d start_raw=0x%02X ch=%c%c%c%c "
-                 "release_raw=0x%02X duration=%u ms",
+                 "release_raw=0x%02X peak=%c duration=%u ms",
                  event_name,
                  press_start_zones_[0], press_start_zones_[1], press_start_zones_[2],
                  press_start_output1_raw_,
@@ -4870,6 +4872,7 @@ private:
                  Si12tChLevelChar(press_start_output1_raw_, 2),
                  Si12tChLevelChar(press_start_output1_raw_, 3),
                  last_output1_raw_,
+                 "0LMH"[press_peak_level_ & 3],
                  (unsigned)duration_ms);
     }
 
@@ -4924,6 +4927,10 @@ private:
         bool any_pressed = s.zone[0] || s.zone[1] || s.zone[2];
         if (any_pressed) {
             HandleScreenActivity();
+            for (int ch = 0; ch < 3; ch++) {   // Mochi v20: track the press's peak level for the faint-touch filter
+                uint8_t lv = (s.output1_raw >> (ch * 2)) & 0x3;
+                if (lv > press_peak_level_) press_peak_level_ = lv;
+            }
         }
 
         // Asymmetric debounce:
@@ -4965,6 +4972,11 @@ private:
             press_start_zones_[1] = s.zone[1];
             press_start_zones_[2] = s.zone[2];
             press_start_output1_raw_ = s.output1_raw;
+            press_peak_level_ = 0;
+            for (int ch = 0; ch < 3; ch++) {
+                uint8_t lv = (s.output1_raw >> (ch * 2)) & 0x3;
+                if (lv > press_peak_level_) press_peak_level_ = lv;
+            }
             const uint64_t last_motion = last_motion_us_.load(std::memory_order_relaxed);
             if (last_motion != 0 &&
                 now_us < last_motion + (uint64_t)MOTION_TOUCH_GUARD_MS * 1000ULL) {
@@ -4995,6 +5007,12 @@ private:
             uint64_t duration_ms = (now_us - touch_press_start_us_) / 1000ULL;
             if (now_us < cooldown_until_us_) {
                 // We were in cooldown when pressed — drop the release event too.
+                return;
+            }
+            // Mochi v20 (Tai 24-Oct 'phantom pats'): most phantom touches only ever reach level L (0x01) on the pad;
+            // Tai's real pats reached M and H. Faint-only presses are logged and dropped, with no reaction or event.
+            if (press_peak_level_ < TOUCH_MIN_LEVEL) {
+                ESP_LOGI(TAG, "touch ignored: faint (peak %c, %u ms)", "0LMH"[press_peak_level_ & 3], (unsigned)duration_ms);
                 return;
             }
             if (duration_ms >= STROKE_MIN_MS) {
