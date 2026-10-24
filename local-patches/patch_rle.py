@@ -19,7 +19,7 @@ EDITS = {
         ('        kimg_bytes = 160 * 120 * 2  # 38_400 — matches AvatarSet::kImageBytes\n',
          '        kimg_bytes = 160 * 120 * 2  # 38_400 — matches AvatarSet::kImageBytes\n'
          '        if mode == "matrix_rle":  # STACKCHAN-LOCAL-PATCH rle: header "RLE1" + raw size of a matrix set\n'
-         '            if payload[:4] != b"RLE1" or int.from_bytes(payload[4:8], "little") != 90 * kimg_bytes:\n'
+         '            if payload[:4] not in (b"RLE1", b"RLE2") or int.from_bytes(payload[4:8], "little") != 90 * kimg_bytes:  # RLE2: Mochi v18\n'
          '                return {"ok": False, "error": "bad_rle_payload"}\n'),
         ('            "panel":   320 * 240 * 2,     # 153_600  STACKCHAN-LOCAL-PATCH panel\n        }.get(mode)',
          '            "panel":   320 * 240 * 2,     # 153_600  STACKCHAN-LOCAL-PATCH panel\n'

@@ -263,7 +263,7 @@ class Gateway:
 
         kimg_bytes = 160 * 120 * 2  # 38_400 — matches AvatarSet::kImageBytes
         if mode == "matrix_rle":  # STACKCHAN-LOCAL-PATCH rle: header "RLE1" + raw size of a matrix set
-            if payload[:4] != b"RLE1" or int.from_bytes(payload[4:8], "little") != 90 * kimg_bytes:
+            if payload[:4] not in (b"RLE1", b"RLE2") or int.from_bytes(payload[4:8], "little") != 90 * kimg_bytes:  # RLE2: Mochi v18
                 return {"ok": False, "error": "bad_rle_payload"}
         expected = {
             "layered": 14 * kimg_bytes,   # 537_600

@@ -187,6 +187,17 @@ public:
         brightness = ((brightness + 641) >> 5);
         WriteReg(0x99, brightness);
     }
+
+    // Mochi v18 power diagnostics (she switched off by herself on 23/24-Oct, screen black, USB gone): non-aborting
+    // register reads for the boot line (power-on / last power-off source) and the 60 s power line.
+    bool TryReadReg(uint8_t reg, uint8_t* value) {
+        return i2c_master_transmit_receive(i2c_device_, &reg, 1, value, 1, 100) == ESP_OK;
+    }
+    int TryAdcMv(uint8_t reg_hi, uint8_t hi_mask) {   // AXP2101 ADC pairs in mV: VBAT 0x34 (5+8 bits), VBUS 0x38 and
+        uint8_t h = 0, l = 0;                           // VSYS 0x3A (6+8 bits); -1 on a read error
+        if (!TryReadReg(reg_hi, &h) || !TryReadReg(reg_hi + 1, &l)) return -1;
+        return ((h & hi_mask) << 8) | l;
+    }
 };
 
 class CustomBacklight : public Backlight {
@@ -2488,9 +2499,13 @@ private:
             GetBacklight()->RestoreBrightness();
         });
         power_save_timer_->OnShutdownRequest([this]() {
+            ESP_LOGW(TAG, "Power save timer: idle too long on battery, powering off");
             pmic_->PowerOff();
         });
-        power_save_timer_->SetEnabled(true);
+        // Mochi v18: start disabled. It was enabled at boot and only re-evaluated when "discharging" changed, so on
+        // USB power (never discharging) it stayed armed: 60 s idle = screen dimmed to 10, 300 s = power off.
+        // GetBatteryLevel() turns it on when she really runs on battery.
+        power_save_timer_->SetEnabled(false);
     }
 
     void StopScreenOffTimerLocked() {
@@ -3033,6 +3048,11 @@ private:
     void InitializeAxp2101() {
         ESP_LOGI(TAG, "Init AXP2101");
         pmic_ = new Pmic(i2c_bus_, 0x34);
+        {   // Mochi v18: why did she last switch off? (AXP2101 reg 0x20 power-on source, 0x21 power-off source)
+            uint8_t on = 0, off = 0;
+            const bool ok = pmic_->TryReadReg(0x20, &on) && pmic_->TryReadReg(0x21, &off);
+            ESP_LOGW(TAG, "PMIC boot: power-on source 0x%02x, last power-off source 0x%02x%s", on, off, ok ? "" : " (read failed)");
+        }
         if (STACKCHAN_CHARGE_AUTO != 0) {
             int level = -1;
             bool level_available = ReadBatteryLevel(&level);
@@ -8095,6 +8115,18 @@ public:
             last_discharging = discharging;
         }
 
+        static int64_t last_power_log_us = 0;   // Mochi v18: one power line a minute, for the background serial log
+        const int64_t now_us = esp_timer_get_time();
+        if (now_us - last_power_log_us >= 60LL * 1000 * 1000) {
+            last_power_log_us = now_us;
+            uint8_t st1 = 0, st2 = 0;
+            pmic_->TryReadReg(0x00, &st1);
+            pmic_->TryReadReg(0x01, &st2);
+            ESP_LOGI(TAG, "Power: battery %d%% vbat %d mV vbus %d mV vsys %d mV charging=%d discharging=%d status 0x%02x/0x%02x",
+                     level, pmic_->TryAdcMv(0x34, 0x1F), pmic_->TryAdcMv(0x38, 0x3F), pmic_->TryAdcMv(0x3A, 0x3F),
+                     charging ? 1 : 0, discharging ? 1 : 0, st1, st2);
+        }
+
         return true;
     }
 
@@ -8420,7 +8452,52 @@ public:
 
     // RLE1: "RLE1" + uint32 LE raw size, then uint16 LE tokens: bit15 set = repeat the next uint16
     // pixel (ctrl & 0x7FFF) times, else ctrl literal pixels follow. Bounds-checked; false on any error.
+    // Mochi v18: also "RLE2" (local-patches/rle565.py): "RLE2" + uint32 LE raw size + uint32 LE frame size, then
+    // uint16 LE tokens, kind = ctrl >> 14, n = ctrl & 0x3FFF pixels: 0 literal, 1 repeat the next pixel, 2 copy from
+    // the same place in the previous frame, 3 copy from the same place in frame 0. A face set shares its background
+    // with frame 0, so it shrinks ~10-30x (TV 1.8 MB -> 115 KB): less download, and no PSRAM squeeze on a swap.
+    static bool DecodeRle2(const uint8_t* in, size_t in_len, uint8_t* out, size_t out_len) {
+        if (in_len < 12 || memcmp(in, "RLE2", 4) != 0) return false;
+        const uint32_t raw = in[4] | (in[5] << 8) | (in[6] << 16) | ((uint32_t)in[7] << 24);
+        const uint32_t frame = in[8] | (in[9] << 8) | (in[10] << 16) | ((uint32_t)in[11] << 24);
+        if (raw != out_len || frame == 0 || (frame & 1) != 0 || out_len % frame != 0) return false;
+        size_t i = 12, o = 0;
+        while (i + 2 <= in_len) {
+            const uint16_t ctrl = in[i] | (in[i + 1] << 8);
+            i += 2;
+            const size_t bytes = (size_t)(ctrl & 0x3FFF) * 2;
+            if (o + bytes > out_len) return false;
+            switch (ctrl >> 14) {
+                case 0:   // literal pixels
+                    if (i + bytes > in_len) return false;
+                    if (out != nullptr) memcpy(out + o, in + i, bytes);
+                    i += bytes;
+                    break;
+                case 1: {  // one pixel, repeated
+                    if (i + 2 > in_len) return false;
+                    const uint8_t lo = in[i], hi = in[i + 1];
+                    i += 2;
+                    if (out != nullptr) for (size_t k = 0; k < bytes; k += 2) { out[o + k] = lo; out[o + k + 1] = hi; }
+                    break;
+                }
+                case 2:   // same place, previous frame (runs are < one frame, so the ranges never overlap)
+                    if (o < frame || bytes > frame) return false;
+                    if (out != nullptr) memcpy(out + o, out + o - frame, bytes);
+                    break;
+                default: {  // same place, frame 0 (the run stays inside frame 0)
+                    const size_t src = o % frame;
+                    if (o < frame || src + bytes > frame) return false;
+                    if (out != nullptr) memcpy(out + o, out + src, bytes);
+                    break;
+                }
+            }
+            o += bytes;
+        }
+        return o == out_len && i == in_len;
+    }
+
     static bool DecodeRle1(const uint8_t* in, size_t in_len, uint8_t* out, size_t out_len) {
+        if (in_len >= 4 && memcmp(in, "RLE2", 4) == 0) return DecodeRle2(in, in_len, out, out_len);   // Mochi v18
         if (in_len < 8 || memcmp(in, "RLE1", 4) != 0) return false;
         const uint32_t raw = in[4] | (in[5] << 8) | (in[6] << 16) | ((uint32_t)in[7] << 24);
         if (raw != out_len) return false;
