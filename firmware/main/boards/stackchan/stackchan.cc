@@ -1104,6 +1104,7 @@ private:
     // before/after the wobble so that an external set_head_angles call is
     // not silently overwritten beyond the wobble window.
     std::atomic<int> servo_wobble_step_{0};       // 0..3 sequence index
+    int servo_wobble_base_ = 0;                   // Mochi v25: yaw the wobble swings around (set at step 0, motion_mutex_)
     std::atomic<bool> servo_wobble_active_{false};
 
     // Shared motion state. This stays on the board singleton because boot-init
@@ -4754,7 +4755,16 @@ private:
         }
         const int A = SERVO_WOBBLE_AMPLITUDE_DEG;
         int step = servo_wobble_step_.load();
-        int target_yaw = 0;
+        // Mochi v25 (Tai 24-Oct: 'weird for her to revert to centre before blushing'): wobble around where she is
+        // looking, not around yaw 0, and end there (it used to swing through centre and stop at 0, a big fast move
+        // when she faces Tai at ~40 deg)
+        if (step == 0) {
+            servo_wobble_base_ = yaw_motion_.current_deg;
+            if (servo_wobble_base_ > 90 - A) servo_wobble_base_ = 90 - A;
+            if (servo_wobble_base_ < -90 + A) servo_wobble_base_ = -90 + A;
+        }
+        const int B = servo_wobble_base_;
+        int target_yaw = B;
         // Preserve the current pitch through the wobble sequence; only the
         // yaw axis is animated. A hardcoded `target_pitch = 0` on every
         // step would command the SCS0009 pitch axis toward the lower
@@ -4765,10 +4775,10 @@ private:
         // motion_mutex_ is already held (see contract above). #175.
         int target_pitch = pitch_motion_.current_deg;
         switch (step) {
-            case 0: target_yaw = -A; break;
-            case 1: target_yaw = +A; break;
-            case 2: target_yaw = -A; break;
-            case 3: target_yaw =  0; break;
+            case 0: target_yaw = B - A; break;
+            case 1: target_yaw = B + A; break;
+            case 2: target_yaw = B - A; break;
+            case 3: target_yaw = B; break;
             default:
                 servo_wobble_active_.store(false);
                 xSemaphoreGive(motion_mutex_);
