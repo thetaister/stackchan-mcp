@@ -557,8 +557,8 @@ private:
 class Si12T : public I2cDevice {
 public:
     static constexpr uint8_t DEFAULT_ADDR = 0x68;  // ID_SEL = GND
-    static constexpr uint8_t SENS_M = 5;     // Mochi v21: middle threshold code (0 most sensitive .. 7 least; reset 3)
-    static constexpr uint8_t RESP_RTC = 5;   // Mochi v21: response period RTC + 2 (reset 2)
+    static constexpr uint8_t SENS_M = 4;     // v22: 4 (v21 had 5: Tai's pats no longer registered; reset 3)
+    static constexpr uint8_t RESP_RTC = 3;   // v22: 3 (v21 had 5; reset 2)
 
     struct TouchState {
         bool zone[3];          // CH1, CH2, CH3 — true if any output level set
