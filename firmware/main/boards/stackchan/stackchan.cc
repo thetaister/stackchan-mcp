@@ -1046,7 +1046,7 @@ private:
     };
     static constexpr int TOUCH_POLL_MS    = 100;  // 100 Hz polling
     static constexpr int TAP_MAX_MS       = 400;
-    static constexpr int STROKE_MIN_MS    = 400;  // was 600; lowered because
+    static constexpr int STROKE_MIN_MS    = 200;  // v23: 200 (Tai 24-Oct: with v22's slower pad a normal pat read as a 'tap' and got no wobble); was 400, was 600; lowered because
                                                   // finger-glide between zones
                                                   // and Si12T auto-recalibration
                                                   // inject brief "all-false"
